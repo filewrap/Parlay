@@ -8,6 +8,7 @@ connect/authorize branching is tested without a live connection.
 from __future__ import annotations
 
 import pytest
+from telethon.crypto import AuthKey
 from telethon.sessions import StringSession
 
 from parlay.client import AuthorizationError, build_client, start_authorized
@@ -34,10 +35,20 @@ def _config(**overrides: object) -> Config:
     return Config(**base)  # type: ignore[arg-type]
 
 
+def _valid_string_session() -> str:
+    """Produce a valid, non-empty StringSession string (no network needed).
+
+    An empty StringSession saves to ''(falsy); build_client only picks the
+    string session when it is truthy, so the test needs a populated one.
+    """
+    session = StringSession()
+    session.set_dc(1, "127.0.0.1", 80)
+    session.auth_key = AuthKey(bytes(256))
+    return session.save()
+
+
 def test_build_client_uses_string_session_when_provided() -> None:
-    # A valid empty StringSession round-trips through save(); use that value.
-    session_str = StringSession().save()
-    client = build_client(_config(string_session=session_str))
+    client = build_client(_config(string_session=_valid_string_session()))
     assert isinstance(client.session, StringSession)
 
 
