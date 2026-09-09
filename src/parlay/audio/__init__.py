@@ -9,12 +9,12 @@ The tgcalls-specific surface is isolated in `rawcall.py`; everything else in
 this package is pure Python and unit-tested.
 """
 
-from .frames import AudioChunk, Pcm48kFrame, CALL_RATE, CALL_CHANNELS, FRAME_MS
+from .frames import CALL_CHANNELS, CALL_RATE, FRAME_MS, AudioChunk, Pcm48kFrame
 
 __all__ = [
+    "CALL_CHANNELS",
+    "CALL_RATE",
+    "FRAME_MS",
     "AudioChunk",
     "Pcm48kFrame",
-    "CALL_RATE",
-    "CALL_CHANNELS",
-    "FRAME_MS",
 ]
