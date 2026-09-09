@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
-from .po_token import PoTokenError, PoTokenProvider
+from .po_token import PoTokenProvider
 from .track import (
     SOURCE_PRIORITY,
     MediaSource,
@@ -32,6 +33,9 @@ log = logging.getLogger(__name__)
 # Default public fallback instances; overridable by the caller for tuning.
 DEFAULT_INVIDIOUS = "https://yewtu.be"
 DEFAULT_PIPED = "https://piped.video"
+
+_YOUTUBE_ID_RE = re.compile(r"(?:v=|youtu\.be/|/watch\?v=)([A-Za-z0-9_-]{11})")
+_BARE_ID_RE = re.compile(r"[A-Za-z0-9_-]{11}")
 
 
 class SourceSelector:
@@ -90,10 +94,9 @@ class SourceSelector:
         }
         if source is MediaSource.YOUTUBE:
             # Cookieless YouTube via the mweb/web_music client and a PO token.
-            try:
-                token = await self._po_tokens.fetch()
-            except PoTokenError:
-                raise
+            # A PoTokenError here propagates as this source's failure and the
+            # caller falls through to Invidious.
+            token = await self._po_tokens.fetch()
             opts["extractor_args"] = {
                 "youtube": {
                     "player_client": ["mweb", "web_music"],
@@ -136,9 +139,7 @@ class SourceSelector:
 
 def _youtube_id(ref: str) -> str | None:
     """Extract an 11-char YouTube video id from a URL or bare id."""
-    import re
-
-    if re.fullmatch(r"[A-Za-z0-9_-]{11}", ref):
+    if _BARE_ID_RE.fullmatch(ref):
         return ref
-    match = re.search(r"(?:v=|youtu\.be/|/watch\?v=)([A-Za-z0-9_-]{11})", ref)
+    match = _YOUTUBE_ID_RE.search(ref)
     return match.group(1) if match else None
