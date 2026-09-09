@@ -3,6 +3,8 @@
 This is the control skeleton. Command handlers here return status text and
 drive the CallSessionManager. Actual audio join/capture/playback is wired in by
 later work orders (WO-2, WO-3); music handlers by WO-5/WO-6.
+
+All outgoing messages are formatted through the shared presentation layer.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ import logging
 
 from telethon import TelegramClient, events
 
+from . import presentation as fmt
 from .commands import CommandHandler, MUSIC_COMMANDS, ParsedCommand
 from .config import Config
 from .session import CallSessionManager, SessionError
@@ -44,37 +47,38 @@ class ParlayApp:
         try:
             self.sessions.begin_join(target)
         except SessionError as exc:
-            return str(exc)
+            return fmt.error(str(exc))
         # Audio join via py-tgcalls is wired in WO-2; mark connected for now.
         self.sessions.mark_connected()
-        return f"Joined {target}."
+        return fmt.success(f"Joined {target}.")
 
     async def _cmd_leave(self, command: ParsedCommand) -> str:
         try:
             self.sessions.end()
         except SessionError as exc:
-            return str(exc)
-        return "Left the voice chat."
+            return fmt.error(str(exc))
+        return fmt.success("Left the voice chat.")
 
     async def _cmd_start(self, command: ParsedCommand) -> str:
         try:
             self.sessions.engage_ai()
         except SessionError as exc:
-            return str(exc)
-        return "AI voice pipeline engaged."
+            return fmt.error(str(exc))
+        return fmt.success("AI voice pipeline engaged.")
 
     async def _cmd_stop(self, command: ParsedCommand) -> str:
         try:
             self.sessions.disengage_ai()
         except SessionError as exc:
-            return str(exc)
-        return "AI voice pipeline stopped."
+            return fmt.error(str(exc))
+        return fmt.success("AI voice pipeline stopped.")
 
     async def _cmd_status(self, command: ParsedCommand) -> str:
-        return self.sessions.status_text()
+        icon_key = "connected" if self.sessions.active else "idle"
+        return fmt.status(self.sessions.status_text(), icon_key)
 
     async def _cmd_music_pending(self, command: ParsedCommand) -> str:
-        return _MUSIC_PENDING
+        return fmt.warning(_MUSIC_PENDING)
 
     async def _on_message(self, event: events.NewMessage.Event) -> None:
         reply = await self.commands.dispatch(event.raw_text, event.sender_id)
