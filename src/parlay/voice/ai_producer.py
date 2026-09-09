@@ -18,7 +18,12 @@ import logging
 
 from ..audio.arbiter import AudioOutputArbiter, PlaybackHandle
 from .provider import VoiceProvider
-from .session_manager import CapturedSource, LossHandler, ProviderSessionManager
+from .session_manager import (
+    CapturedSource,
+    LossHandler,
+    ProviderSessionManager,
+    SpeakingHandler,
+)
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +37,7 @@ class AiVoiceProducer:
         source: CapturedSource,
         arbiter: AudioOutputArbiter,
         on_loss: LossHandler | None = None,
+        on_speaking: SpeakingHandler | None = None,
     ) -> None:
         self._arbiter = arbiter
         self._sink: PlaybackHandle = arbiter.handle_for(self)
@@ -40,6 +46,7 @@ class AiVoiceProducer:
             source=source,
             sink=self._sink,
             on_loss=on_loss,
+            on_speaking=on_speaking,
         )
 
     @property
