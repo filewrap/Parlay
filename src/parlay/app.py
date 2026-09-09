@@ -1,11 +1,16 @@
 """Application wiring: builds the Telethon client, registers commands, runs.
 
 The command handlers drive the CallSessionManager and the RawAudioBridge.
-Join brings up the raw audio bridge and the Audio Output Arbiter; leave tears
-them down and releases buffers. `/start` engages the AI Voice Pipeline as a
-producer behind the Arbiter over the bridge's Captured Stream and Playback
-Sink; `/stop` disengages it. Music (WO-5/WO-6) plugs into the same Arbiter
-later, so AI and music never play at once (REQ-INJ-006).
+Join brings up the raw audio bridge, the Audio Output Arbiter, and the music
+controller; leave tears them down and releases buffers. `/start` engages the AI
+Voice Pipeline as a producer behind the Arbiter over the bridge's Captured
+Stream and Playback Sink; `/stop` is context-aware: it stops music when music
+is playing, otherwise it disengages the AI pipeline. Music and AI share the one
+Arbiter, so they never play at once (REQ-INJ-006).
+
+The music commands (play/skip/pause/resume/queue) are handled by the
+MusicController, which resolves tracks through the Media Sourcing Pipeline and
+plays them through the Arbiter.
 
 An unexpected call drop is reported to the Operator and ends the session so a
 later join can succeed (REQ-BOT-006).
@@ -22,16 +27,19 @@ from telethon import TelegramClient, events
 from . import presentation as fmt
 from .audio.arbiter import AudioOutputArbiter
 from .audio.bridge import RawAudioBridge
-from .commands import MUSIC_COMMANDS, CommandHandler, ParsedCommand
+from .commands import CommandHandler, ParsedCommand
 from .config import Config
+from .media.resolver import TrackResolver
+from .media.source_selector import SourceSelector
+from .media.po_token import PoTokenProvider
+from .media.transcoder import MediaTranscoder
+from .music.controller import MusicController
 from .session import CallSessionManager, SessionError
 from .voice.ai_producer import AiVoiceProducer
 from .voice.gemini import GeminiVoiceProvider
 from .voice.provider import ProviderError
 
 log = logging.getLogger(__name__)
-
-_MUSIC_PENDING = "That command is not available yet (implemented in a later work order)."
 
 
 class ParlayApp:
@@ -45,6 +53,7 @@ class ParlayApp:
         self.bridge: RawAudioBridge | None = None
         self.arbiter: AudioOutputArbiter | None = None
         self.ai: AiVoiceProducer | None = None
+        self.music: MusicController | None = None
         self._register_commands()
 
     def _register_commands(self) -> None:
@@ -53,8 +62,11 @@ class ParlayApp:
         self.commands.register("start", self._cmd_start)
         self.commands.register("stop", self._cmd_stop)
         self.commands.register("status", self._cmd_status)
-        for name in MUSIC_COMMANDS:
-            self.commands.register(name, self._cmd_music_pending)
+        self.commands.register("play", self._cmd_play)
+        self.commands.register("skip", self._cmd_skip)
+        self.commands.register("pause", self._cmd_pause)
+        self.commands.register("resume", self._cmd_resume)
+        self.commands.register("queue", self._cmd_queue)
 
     async def _cmd_join(self, command: ParsedCommand) -> str:
         target = command.args or "the current chat"
@@ -74,8 +86,30 @@ class ParlayApp:
         # The Arbiter owns the single call output; producers request it through
         # the Arbiter so AI and music never mix (REQ-INJ-006).
         self.arbiter = AudioOutputArbiter(bridge)
+        self.music = self._build_music(self.arbiter)
         self.sessions.mark_connected()
         return fmt.success(f"Joined {target}.")
+
+    def _build_music(self, arbiter: AudioOutputArbiter) -> MusicController:
+        """Assemble the Media Sourcing Pipeline and MusicController for a session."""
+        po_tokens = PoTokenProvider(self.config.pot_provider_url)
+        selector = SourceSelector(po_tokens)
+        resolver = TrackResolver(selector)
+        transcoder = MediaTranscoder()
+        return MusicController(
+            self.sessions,
+            arbiter,
+            resolver,
+            transcoder,
+            post_message=self._post_to_call,
+        )
+
+    async def _post_to_call(self, text: str) -> None:
+        """Post an in-call message to the active Call Session's chat."""
+        session = self.sessions.session
+        if session is None:
+            return
+        await self.client.send_message(session.chat, text)
 
     async def _cmd_leave(self, command: ParsedCommand) -> str:
         try:
@@ -111,6 +145,9 @@ class ParlayApp:
         return fmt.success("AI voice pipeline engaged.")
 
     async def _cmd_stop(self, command: ParsedCommand) -> str:
+        # Context-aware: stop music when music is playing, else disengage the AI.
+        if self.music is not None and self.music.is_active:
+            return await self.music.stop()
         try:
             self.sessions.disengage_ai()
         except SessionError as exc:
@@ -122,8 +159,30 @@ class ParlayApp:
         icon_key = "connected" if self.sessions.active else "idle"
         return fmt.status(self.sessions.status_text(), icon_key)
 
-    async def _cmd_music_pending(self, command: ParsedCommand) -> str:
-        return fmt.warning(_MUSIC_PENDING)
+    async def _cmd_play(self, command: ParsedCommand) -> str:
+        if self.music is None:
+            return fmt.error("Join a voice chat first.")
+        return await self.music.play(command.args)
+
+    async def _cmd_skip(self, command: ParsedCommand) -> str:
+        if self.music is None:
+            return fmt.error("Join a voice chat first.")
+        return await self.music.skip()
+
+    async def _cmd_pause(self, command: ParsedCommand) -> str:
+        if self.music is None:
+            return fmt.error("Join a voice chat first.")
+        return await self.music.pause()
+
+    async def _cmd_resume(self, command: ParsedCommand) -> str:
+        if self.music is None:
+            return fmt.error("Join a voice chat first.")
+        return await self.music.resume()
+
+    async def _cmd_queue(self, command: ParsedCommand) -> str:
+        if self.music is None:
+            return fmt.error("Join a voice chat first.")
+        return await self.music.show_queue()
 
     async def _teardown_pipeline(self) -> None:
         if self.ai is not None:
@@ -131,6 +190,9 @@ class ParlayApp:
             self.ai = None
 
     async def _teardown_bridge(self) -> None:
+        if self.music is not None:
+            await self.music.on_session_end()
+            self.music = None
         if self.bridge is not None:
             await self.bridge.stop()
             self.bridge = None
