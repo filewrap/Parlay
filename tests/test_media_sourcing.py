@@ -1,8 +1,9 @@
 """Tests for the Media Sourcing Pipeline (REQ-MUS-003).
 
 These exercise the pure logic: fallback order across sources, all-fail
-reporting, highest-quality audio selection, YouTube id parsing, and PO-token
-parsing. yt-dlp and ffmpeg are never invoked; extraction is faked.
+reporting, highest-quality audio selection, YouTube id parsing, and the
+PO-token provider's extractor-args and health check. yt-dlp and ffmpeg are
+never invoked; extraction is faked.
 """
 
 from __future__ import annotations
@@ -18,8 +19,8 @@ from parlay.media.track import (
 
 
 class FakePoTokens:
-    async def fetch(self, *, content_binding: str | None = None) -> str:
-        return "tok"
+    def extractor_args(self) -> dict[str, list[str]]:
+        return {"youtubepot-bgutilhttp": ["base_url=http://prov:4416"]}
 
 
 def _track() -> Track:
@@ -84,29 +85,37 @@ def test_youtube_id_parsing() -> None:
     assert _youtube_id("not a link") is None
 
 
-async def test_po_token_parses_response(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_po_token_extractor_args_point_at_base_url() -> None:
+    from parlay.media import po_token
+
+    provider = po_token.PoTokenProvider("http://prov:4416/")
+    args = provider.extractor_args()
+    assert args == {"youtubepot-bgutilhttp": ["base_url=http://prov:4416"]}
+
+
+async def test_po_token_ping_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     from parlay.media import po_token
 
     provider = po_token.PoTokenProvider("http://prov:4416")
 
-    def fake_fetch_sync(content_binding: str | None) -> str:
-        return "the-token"
+    def fake_ping_sync() -> None:
+        return None
 
-    monkeypatch.setattr(provider, "_fetch_sync", fake_fetch_sync)
-    assert await provider.fetch() == "the-token"
+    monkeypatch.setattr(provider, "_ping_sync", fake_ping_sync)
+    await provider.ping()  # should not raise
 
 
-async def test_po_token_error_on_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_po_token_ping_error(monkeypatch: pytest.MonkeyPatch) -> None:
     from parlay.media import po_token
 
     provider = po_token.PoTokenProvider("http://prov:4416")
 
-    def fake_fetch_sync(content_binding: str | None) -> str:
-        raise po_token.PoTokenError("no token")
+    def fake_ping_sync() -> None:
+        raise po_token.PoTokenError("unreachable")
 
-    monkeypatch.setattr(provider, "_fetch_sync", fake_fetch_sync)
+    monkeypatch.setattr(provider, "_ping_sync", fake_ping_sync)
     with pytest.raises(po_token.PoTokenError):
-        await provider.fetch()
+        await provider.ping()
 
 
 if __name__ == "__main__":
