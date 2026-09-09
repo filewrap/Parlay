@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 from .app import ParlayApp
+from .client import AuthorizationError
 from .config import ConfigError, load_config
 from .logging_setup import setup_logging
 
@@ -22,6 +23,9 @@ def main() -> int:
     app = ParlayApp(config)
     try:
         asyncio.run(app.run())
+    except AuthorizationError as exc:
+        log.error("Authorization error: %s", exc)
+        return 3
     except KeyboardInterrupt:
         log.info("Shutting down.")
     return 0
