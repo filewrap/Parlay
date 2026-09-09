@@ -1,10 +1,11 @@
 """Application wiring: builds the Telethon client, registers commands, runs.
 
 The command handlers drive the CallSessionManager and the RawAudioBridge.
-Join brings up the raw audio bridge; leave tears it down and releases buffers.
-`/start` engages the AI Voice Pipeline over the bridge's Captured Stream and
-Playback Sink; `/stop` disengages it. Music (WO-5/WO-6) plugs into the same
-bridge later.
+Join brings up the raw audio bridge and the Audio Output Arbiter; leave tears
+them down and releases buffers. `/start` engages the AI Voice Pipeline as a
+producer behind the Arbiter over the bridge's Captured Stream and Playback
+Sink; `/stop` disengages it. Music (WO-5/WO-6) plugs into the same Arbiter
+later, so AI and music never play at once (REQ-INJ-006).
 
 An unexpected call drop is reported to the Operator and ends the session so a
 later join can succeed (REQ-BOT-006).
@@ -19,13 +20,14 @@ import logging
 from telethon import TelegramClient, events
 
 from . import presentation as fmt
+from .audio.arbiter import AudioOutputArbiter
 from .audio.bridge import RawAudioBridge
 from .commands import MUSIC_COMMANDS, CommandHandler, ParsedCommand
 from .config import Config
 from .session import CallSessionManager, SessionError
+from .voice.ai_producer import AiVoiceProducer
 from .voice.gemini import GeminiVoiceProvider
 from .voice.provider import ProviderError
-from .voice.session_manager import ProviderSessionManager
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +43,8 @@ class ParlayApp:
         self.sessions = CallSessionManager()
         self.commands = CommandHandler(config.operator_id, config.command_prefix)
         self.bridge: RawAudioBridge | None = None
-        self.pipeline: ProviderSessionManager | None = None
+        self.arbiter: AudioOutputArbiter | None = None
+        self.ai: AiVoiceProducer | None = None
         self._register_commands()
 
     def _register_commands(self) -> None:
@@ -68,6 +71,9 @@ class ParlayApp:
             self.sessions.end()
             return fmt.error(f"Could not join {target}: {exc}")
         self.bridge = bridge
+        # The Arbiter owns the single call output; producers request it through
+        # the Arbiter so AI and music never mix (REQ-INJ-006).
+        self.arbiter = AudioOutputArbiter(bridge)
         self.sessions.mark_connected()
         return fmt.success(f"Joined {target}.")
 
@@ -81,27 +87,27 @@ class ParlayApp:
         return fmt.success("Left the voice chat.")
 
     async def _cmd_start(self, command: ParsedCommand) -> str:
-        if self.bridge is None:
+        if self.bridge is None or self.arbiter is None:
             return fmt.error("Join a voice chat first.")
         try:
             self.sessions.engage_ai()
         except SessionError as exc:
             return fmt.error(str(exc))
         provider = GeminiVoiceProvider(self.config.gemini_api_key)
-        pipeline = ProviderSessionManager(
+        ai = AiVoiceProducer(
             provider,
             source=self.bridge,
-            sink=self.bridge,
+            arbiter=self.arbiter,
             on_loss=self._on_pipeline_loss,
         )
         try:
-            await pipeline.engage()
+            await ai.engage()
         except ProviderError as exc:
             # Do not leave the pipeline engaged if the session cannot open.
             self.sessions.disengage_ai()
             log.exception("failed to engage AI voice pipeline")
             return fmt.error(f"Could not engage the AI pipeline: {exc}")
-        self.pipeline = pipeline
+        self.ai = ai
         return fmt.success("AI voice pipeline engaged.")
 
     async def _cmd_stop(self, command: ParsedCommand) -> str:
@@ -120,14 +126,15 @@ class ParlayApp:
         return fmt.warning(_MUSIC_PENDING)
 
     async def _teardown_pipeline(self) -> None:
-        if self.pipeline is not None:
-            await self.pipeline.disengage()
-            self.pipeline = None
+        if self.ai is not None:
+            await self.ai.disengage()
+            self.ai = None
 
     async def _teardown_bridge(self) -> None:
         if self.bridge is not None:
             await self.bridge.stop()
             self.bridge = None
+        self.arbiter = None
 
     async def _on_call_dropped(self) -> None:
         """Handle an unexpected voice-chat disconnect (REQ-BOT-006).
@@ -155,7 +162,7 @@ class ParlayApp:
 
     async def _on_pipeline_loss(self, reason: str) -> None:
         """Called when the pipeline disengages itself after an unrecoverable loss."""
-        self.pipeline = None
+        self.ai = None
         try:
             self.sessions.disengage_ai()
         except SessionError:
