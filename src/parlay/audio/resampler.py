@@ -57,7 +57,7 @@ def _resample_rate(mono: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray
     if src_rate == dst_rate or mono.size == 0:
         return mono
     duration = mono.size / src_rate
-    dst_n = int(round(duration * dst_rate))
+    dst_n = round(duration * dst_rate)
     if dst_n <= 0:
         return np.zeros(0, dtype=np.float32)
     # Sample positions in the source timeline.
