@@ -16,7 +16,7 @@ from telethon import TelegramClient, events
 
 from . import presentation as fmt
 from .audio.bridge import RawAudioBridge
-from .commands import CommandHandler, MUSIC_COMMANDS, ParsedCommand
+from .commands import MUSIC_COMMANDS, CommandHandler, ParsedCommand
 from .config import Config
 from .session import CallSessionManager, SessionError
 
