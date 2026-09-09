@@ -13,7 +13,6 @@ from collections import deque
 from .frames import (
     CALL_CHANNELS,
     CALL_RATE,
-    SAMPLE_WIDTH,
     Pcm48kFrame,
     bytes_per_ms,
 )
