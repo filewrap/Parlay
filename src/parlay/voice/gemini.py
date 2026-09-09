@@ -127,7 +127,9 @@ class GeminiVoiceProvider:
     async def _connect(self) -> None:
         """Open a live session, reusing the resume handle when present."""
         try:
-            self._cm = self._client.aio.live.connect(model=self._config.model, config=self._build_config())
+            self._cm = self._client.aio.live.connect(
+                model=self._config.model, config=self._build_config()
+            )
             self._session = await self._cm.__aenter__()
         except Exception as exc:
             self._session = None
