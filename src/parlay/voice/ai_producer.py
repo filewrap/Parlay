@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import logging
 
-from ..audio.arbiter import AudioOutputArbiter
-from .session_manager import CapturedSource, LossHandler, ProviderSessionManager
+from ..audio.arbiter import AudioOutputArbiter, PlaybackHandle
 from .provider import VoiceProvider
+from .session_manager import CapturedSource, LossHandler, ProviderSessionManager
 
 log = logging.getLogger(__name__)
 
@@ -34,10 +34,11 @@ class AiVoiceProducer:
         on_loss: LossHandler | None = None,
     ) -> None:
         self._arbiter = arbiter
+        self._sink: PlaybackHandle = arbiter.handle_for(self)
         self._pipeline = ProviderSessionManager(
             provider,
             source=source,
-            sink=arbiter.handle_for(self),
+            sink=self._sink,
             on_loss=on_loss,
         )
 
@@ -65,7 +66,7 @@ class AiVoiceProducer:
     # --- AudioProducer contract (called by the Arbiter on handover) -----
     async def pause(self) -> None:
         """Drop pending reply audio so a preempting producer does not mix."""
-        self._pipeline.interrupt_playback()
+        self._sink.interrupt()
 
     async def resume(self) -> None:
         """No-op: the provider stream continues once the AI regains output."""
