@@ -29,9 +29,9 @@ from .audio.arbiter import AudioOutputArbiter
 from .audio.bridge import RawAudioBridge
 from .commands import CommandHandler, ParsedCommand
 from .config import Config
+from .media.po_token import PoTokenProvider
 from .media.resolver import TrackResolver
 from .media.source_selector import SourceSelector
-from .media.po_token import PoTokenProvider
 from .media.transcoder import MediaTranscoder
 from .music.controller import MusicController
 from .session import CallSessionManager, SessionError
