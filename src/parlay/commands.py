@@ -12,8 +12,8 @@ output later.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Optional
 
 log = logging.getLogger(__name__)
 
@@ -52,20 +52,20 @@ class CommandHandler:
             return False
         return str(sender_id) == self._operator_id
 
-    def parse(self, text: str, sender_id: object) -> Optional[ParsedCommand]:
+    def parse(self, text: str, sender_id: object) -> ParsedCommand | None:
         """Parse a message into a command, or None if it is not one."""
         if not text:
             return None
         stripped = text.strip()
         if not stripped.startswith(self._prefix):
             return None
-        body = stripped[len(self._prefix):]
+        body = stripped[len(self._prefix) :]
         if not body:
             return None
         head, _, rest = body.partition(" ")
         return ParsedCommand(name=head.lower(), args=rest.strip(), sender_id=str(sender_id))
 
-    async def dispatch(self, text: str, sender_id: object) -> Optional[str]:
+    async def dispatch(self, text: str, sender_id: object) -> str | None:
         """Parse, operator-gate, and route a message.
 
         Returns the reply string, or None when the message should be ignored
