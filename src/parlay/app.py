@@ -36,8 +36,8 @@ from .media.transcoder import MediaTranscoder
 from .music.controller import MusicController
 from .session import CallSessionManager, SessionError
 from .voice.ai_producer import AiVoiceProducer
-from .voice.gemini import GeminiVoiceProvider
-from .voice.provider import ProviderError
+from .voice.gemini import GeminiVoiceProvider, default_configuration
+from .voice.provider import ProviderError, SessionConfiguration
 
 log = logging.getLogger(__name__)
 
@@ -104,12 +104,30 @@ class ParlayApp:
             post_message=self._post_to_call,
         )
 
+    def _ai_configuration(self) -> SessionConfiguration:
+        """Build the Session Configuration from config, over the default.
+
+        Any of model / voice / persona left unset falls back to the provider's
+        native-audio default (REQ-AIVP-007.2/.3).
+        """
+        default = default_configuration()
+        return SessionConfiguration(
+            model=self.config.gemini_model or default.model,
+            system_instruction=self.config.gemini_persona or default.system_instruction,
+            voice=self.config.gemini_voice or default.voice,
+            response_modality=default.response_modality,
+        )
+
     async def _post_to_call(self, text: str) -> None:
         """Post an in-call message to the active Call Session's chat."""
         session = self.sessions.session
         if session is None:
             return
         await self.client.send_message(session.chat, text)
+
+    async def _on_ai_speaking(self) -> None:
+        """Announce in-call that the AI is speaking (REQ-AIVP-008.1)."""
+        await self._post_to_call(fmt.status("The AI is speaking.", "speaking"))
 
     async def _cmd_leave(self, command: ParsedCommand) -> str:
         try:
@@ -127,12 +145,13 @@ class ParlayApp:
             self.sessions.engage_ai()
         except SessionError as exc:
             return fmt.error(str(exc))
-        provider = GeminiVoiceProvider(self.config.gemini_api_key)
+        provider = GeminiVoiceProvider(self.config.gemini_api_key, self._ai_configuration())
         ai = AiVoiceProducer(
             provider,
             source=self.bridge,
             arbiter=self.arbiter,
             on_loss=self._on_pipeline_loss,
+            on_speaking=self._on_ai_speaking,
         )
         try:
             await ai.engage()
@@ -233,7 +252,7 @@ class ParlayApp:
         if session is not None:
             try:
                 await self.client.send_message(
-                    session.chat, fmt.error(f"AI voice pipeline stopped: {reason}")
+                    session.chat, fmt.error(f"The AI encountered an error: {reason}")
                 )
             except Exception:
                 log.exception("failed to notify Operator of pipeline loss")
