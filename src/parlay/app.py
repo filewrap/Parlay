@@ -6,6 +6,9 @@ Join brings up the raw audio bridge; leave tears it down and releases buffers.
 Playback Sink; `/stop` disengages it. Music (WO-5/WO-6) plugs into the same
 bridge later.
 
+An unexpected call drop is reported to the Operator and ends the session so a
+later join can succeed (REQ-BOT-006).
+
 All outgoing messages are formatted through the shared presentation layer.
 """
 
@@ -56,8 +59,8 @@ class ParlayApp:
             self.sessions.begin_join(target)
         except SessionError as exc:
             return fmt.error(str(exc))
-        # Bring up the raw audio bridge for this session.
-        bridge = RawAudioBridge(self.client)
+        # Bring up the raw audio bridge for this session, wiring drop detection.
+        bridge = RawAudioBridge(self.client, on_disconnect=self._on_call_dropped)
         try:
             await bridge.start(target)
         except Exception as exc:  # roll back the session on join failure
@@ -74,9 +77,7 @@ class ParlayApp:
         except SessionError as exc:
             return fmt.error(str(exc))
         await self._teardown_pipeline()
-        if self.bridge is not None:
-            await self.bridge.stop()
-            self.bridge = None
+        await self._teardown_bridge()
         return fmt.success("Left the voice chat.")
 
     async def _cmd_start(self, command: ParsedCommand) -> str:
@@ -122,6 +123,35 @@ class ParlayApp:
         if self.pipeline is not None:
             await self.pipeline.disengage()
             self.pipeline = None
+
+    async def _teardown_bridge(self) -> None:
+        if self.bridge is not None:
+            await self.bridge.stop()
+            self.bridge = None
+
+    async def _on_call_dropped(self) -> None:
+        """Handle an unexpected voice-chat disconnect (REQ-BOT-006).
+
+        End the Call Session, tear down the AI pipeline and bridge to release
+        resources so a later join succeeds, and report the drop to the Operator.
+        """
+        if not self.sessions.active:
+            return
+        chat = self.sessions.session.chat if self.sessions.session else None
+        log.warning("voice chat connection dropped; ending session")
+        await self._teardown_pipeline()
+        await self._teardown_bridge()
+        try:
+            self.sessions.end()
+        except SessionError:
+            pass
+        if chat is not None:
+            try:
+                await self.client.send_message(
+                    chat, fmt.error("Voice chat connection dropped; the session has ended.")
+                )
+            except Exception:
+                log.exception("failed to notify Operator of call drop")
 
     async def _on_pipeline_loss(self, reason: str) -> None:
         """Called when the pipeline disengages itself after an unrecoverable loss."""
