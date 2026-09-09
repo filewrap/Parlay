@@ -42,6 +42,15 @@ class CommandHandler:
         self._prefix = prefix
         self._handlers: dict[str, Handler] = {}
 
+    def set_operator_id(self, operator_id: str) -> None:
+        """Update the gated Operator id.
+
+        The app calls this after resolving a username- or phone-configured
+        Operator to its numeric id, so gating matches the numeric `sender_id`
+        Telethon reports on incoming messages.
+        """
+        self._operator_id = str(operator_id)
+
     def register(self, name: str, handler: Handler) -> None:
         """Register a handler for a command name."""
         self._handlers[name] = handler
