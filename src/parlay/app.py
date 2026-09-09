@@ -20,17 +20,26 @@ An unexpected call drop is reported to the Operator and ends the session so a
 later join can succeed (REQ-BOT-006).
 
 All outgoing messages are formatted through the shared presentation layer.
+
+Telethon usage: the client is built and authorized in `client.py`; commands are
+received through an `events.NewMessage` handler filtered to the Operator via
+`from_users` (so non-operator messages never reach the handler), and membership
+changes through `events.ChatAction`. Entities (the Operator, call chats) are
+resolved with `get_input_entity` before use so Telegram requests carry a valid
+InputPeer.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Any
 
-from telethon import TelegramClient, events
+from telethon import events
 
 from . import presentation as fmt
 from .audio.arbiter import AudioOutputArbiter
 from .audio.bridge import RawAudioBridge
+from .client import build_client, start_authorized
 from .commands import CommandHandler, ParsedCommand
 from .config import Config
 from .media.po_token import PoTokenProvider
@@ -54,7 +63,7 @@ class ParlayApp:
 
     def __init__(self, config: Config) -> None:
         self.config = config
-        self.client = TelegramClient(config.session, config.api_id, config.api_hash)
+        self.client = build_client(config)
         self.sessions = CallSessionManager()
         self.commands = CommandHandler(config.operator_id, config.command_prefix)
         self.bridge: RawAudioBridge | None = None
@@ -62,6 +71,9 @@ class ParlayApp:
         self.ai: AiVoiceProducer | None = None
         self.music: MusicController | None = None
         self.membership: MembershipWatcher | None = None
+        # Resolved InputPeer for the Operator; set at startup and reused for
+        # every private notification so no repeat resolution is needed.
+        self._operator_peer: Any | None = None
         self._register_commands()
 
     def _register_commands(self) -> None:
@@ -137,8 +149,11 @@ class ParlayApp:
         """Send a private message to the Operator's own account.
 
         Membership alerts go here and never into a triggering chat (ADR-001).
+        Uses the InputPeer resolved at startup, falling back to the configured
+        id so a notification is never dropped.
         """
-        await self.client.send_message(self.config.operator_id, text)
+        target = self._operator_peer if self._operator_peer is not None else self.config.operator_id
+        await self.client.send_message(target, text)
 
     async def _on_ai_speaking(self) -> None:
         """Announce in-call that the AI is speaking (REQ-AIVP-008.1)."""
@@ -273,6 +288,11 @@ class ParlayApp:
                 log.exception("failed to notify Operator of pipeline loss")
 
     async def _on_message(self, event: events.NewMessage.Event) -> None:
+        """Handle an incoming Operator command.
+
+        The handler is registered with a `from_users` filter, so it only fires
+        for the Operator; the CommandHandler still gates defensively.
+        """
         reply = await self.commands.dispatch(event.raw_text, event.sender_id)
         if reply is not None:
             await event.reply(reply)
@@ -292,13 +312,38 @@ class ParlayApp:
         store = AuditLogStore(self.config.audit_log_path)
         return MembershipWatcher(self_id, [notifier, store])
 
+    async def _resolve_operator(self) -> Any | None:
+        """Resolve the configured Operator to an InputPeer for gating and DMs.
+
+        Accepts a numeric id, username, or phone (per Telethon's entity rules).
+        On success the numeric id also becomes the CommandHandler's gate so a
+        username-configured Operator still matches incoming sender ids.
+        """
+        try:
+            entity = await self.client.get_entity(self.config.operator_id)
+        except (ValueError, TypeError):
+            log.warning("could not resolve OPERATOR_ID %r; gating by raw id", self.config.operator_id)
+            return None
+        self._operator_peer = await self.client.get_input_entity(entity)
+        self.commands.set_operator_id(str(entity.id))
+        return entity
+
     async def run(self) -> None:
         """Start the client and process messages until disconnected."""
-        self.client.add_event_handler(self._on_message, events.NewMessage())
-        self.client.add_event_handler(self._on_chat_action, events.ChatAction())
-        await self.client.start()
+        await start_authorized(self.client)
         me = await self.client.get_me()
+        operator = await self._resolve_operator()
+        # Filter command messages to the Operator at the Telethon layer; fall
+        # back to an unfiltered handler if the Operator could not be resolved.
+        from_users = [operator] if operator is not None else None
+        self.client.add_event_handler(
+            self._on_message, events.NewMessage(incoming=True, from_users=from_users)
+        )
+        self.client.add_event_handler(self._on_chat_action, events.ChatAction())
         # The Membership Audit keys off Parlay's own account id.
         self.membership = self._build_membership(str(me.id))
         log.info("Parlay is online as %s", getattr(me, "username", None) or me.id)
-        await self.client.run_until_disconnected()
+        try:
+            await self.client.run_until_disconnected()
+        finally:
+            await self.client.disconnect()
