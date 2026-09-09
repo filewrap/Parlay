@@ -21,6 +21,29 @@ class ProviderError(RuntimeError):
     """Raised when a provider session cannot be opened or is lost unrecoverably."""
 
 
+class ResponseModality(StrEnum):
+    """How the provider should return its reply for a session (REQ-AIVP-007)."""
+
+    AUDIO = "audio"
+    TEXT = "text"
+
+
+@dataclass(frozen=True)
+class SessionConfiguration:
+    """Provider-agnostic session setup applied when the session opens.
+
+    Carries the model, persona (`system_instruction`), `voice`, and
+    `response_modality`. It is provider-agnostic on purpose: each provider maps
+    these fields onto its own SDK config, and supplies its own default model
+    (this type does not hard-code one).
+    """
+
+    model: str
+    system_instruction: str | None = None
+    voice: str | None = None
+    response_modality: ResponseModality = ResponseModality.AUDIO
+
+
 class ReplyEventKind(StrEnum):
     """Kinds of event a provider emits on its reply stream."""
 
