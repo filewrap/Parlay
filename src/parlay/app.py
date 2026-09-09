@@ -322,7 +322,9 @@ class ParlayApp:
         try:
             entity = await self.client.get_entity(self.config.operator_id)
         except (ValueError, TypeError):
-            log.warning("could not resolve OPERATOR_ID %r; gating by raw id", self.config.operator_id)
+            log.warning(
+                "could not resolve OPERATOR_ID %r; gating by raw id", self.config.operator_id
+            )
             return None
         self._operator_peer = await self.client.get_input_entity(entity)
         self.commands.set_operator_id(str(entity.id))
