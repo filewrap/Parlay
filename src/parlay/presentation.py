@@ -12,10 +12,10 @@ consistent icons and structure.
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 
-class Category(str, Enum):
+class Category(StrEnum):
     """Outcome categories, each with a fixed leading icon."""
 
     SUCCESS = "success"
@@ -26,21 +26,21 @@ class Category(str, Enum):
 
 # Leading icon per outcome category.
 CATEGORY_ICONS: dict[Category, str] = {
-    Category.SUCCESS: "\u2714",   # heavy check mark
-    Category.ERROR: "\u2716",     # heavy multiplication x
-    Category.WARNING: "\u26a0",   # warning sign
-    Category.INFO: "\u2139",      # information source
+    Category.SUCCESS: "\u2714",  # heavy check mark
+    Category.ERROR: "\u2716",  # heavy multiplication x
+    Category.WARNING: "\u26a0",  # warning sign
+    Category.INFO: "\u2139",  # information source
 }
 
 # Transport / status glyphs reused across features.
 ICONS: dict[str, str] = {
-    "play": "\u25b6",       # black right-pointing triangle
-    "pause": "\u23f8",      # double vertical bar
-    "stop": "\u23f9",       # black square for stop
-    "skip": "\u23ed",       # black right-pointing double triangle with bar
-    "queue": "\u2630",      # trigram for heaven (list)
+    "play": "\u25b6",  # black right-pointing triangle
+    "pause": "\u23f8",  # double vertical bar
+    "stop": "\u23f9",  # black square for stop
+    "skip": "\u23ed",  # black right-pointing double triangle with bar
+    "queue": "\u2630",  # trigram for heaven (list)
     "speaking": "\U0001f5e3",  # speaking head (status marker, monochrome intent)
-    "idle": "\u25cb",       # white circle
+    "idle": "\u25cb",  # white circle
     "connected": "\u25cf",  # black circle
 }
 
