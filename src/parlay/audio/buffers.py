@@ -117,4 +117,4 @@ def silence(n: int) -> bytes:
     return b"\x00" * max(0, n)
 
 
-__all__ = ["CaptureQueue", "PlaybackBuffer", "OverflowPolicy", "silence"]
+__all__ = ["CaptureQueue", "OverflowPolicy", "PlaybackBuffer", "silence"]
