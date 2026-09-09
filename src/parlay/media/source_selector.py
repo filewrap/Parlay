@@ -67,7 +67,7 @@ class SourceSelector:
 
     async def _resolve_one(self, source: MediaSource, track: Track) -> StreamSource:
         target = self._target_url(source, track)
-        opts = await self._ydl_opts(source)
+        opts = self._ydl_opts(source)
         info = await asyncio.to_thread(self._extract, target, opts)
         stream_url, abr = self._best_audio(info)
         if not stream_url:
@@ -85,7 +85,7 @@ class SourceSelector:
             return f"{base}/watch?v={video_id}"
         return ref
 
-    async def _ydl_opts(self, source: MediaSource) -> dict[str, Any]:
+    def _ydl_opts(self, source: MediaSource) -> dict[str, Any]:
         opts: dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
@@ -93,15 +93,12 @@ class SourceSelector:
             "format": "bestaudio/best",
         }
         if source is MediaSource.YOUTUBE:
-            # Cookieless YouTube via the mweb/web_music client and a PO token.
-            # A PoTokenError here propagates as this source's failure and the
-            # caller falls through to Invidious.
-            token = await self._po_tokens.fetch()
+            # Cookieless YouTube via the mweb client. The bgutil yt-dlp plugin
+            # mints a fresh, content-bound PO token per video from the running
+            # provider service; we only point it at that service's base URL.
             opts["extractor_args"] = {
-                "youtube": {
-                    "player_client": ["mweb", "web_music"],
-                    "po_token": [f"mweb.gvs+{token}"],
-                }
+                "youtube": {"player_client": ["mweb", "web_music"]},
+                **self._po_tokens.extractor_args(),
             }
         return opts
 
