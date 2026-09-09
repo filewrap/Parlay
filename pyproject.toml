@@ -1,0 +1,44 @@
+[project]
+name = "parlay"
+version = "0.1.0"
+description = "A thin bridge between ntgcalls and Gemini Live, wired into a Telegram voice/music userbot."
+requires-python = ">=3.11"
+dependencies = [
+    "telethon>=1.36",
+    "py-tgcalls>=2.1",
+    "google-genai>=0.3",
+    "yt-dlp>=2024.8.6",
+    "numpy>=1.26",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[project.scripts]
+parlay = "parlay.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["parlay"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
