@@ -21,7 +21,8 @@ Audio boundary: S16LE, 48 kHz, stereo, 10 ms frames.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Protocol
+from collections.abc import Callable
+from typing import Any, Protocol
 
 log = logging.getLogger(__name__)
 
