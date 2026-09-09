@@ -12,6 +12,10 @@ The music commands (play/skip/pause/resume/queue) are handled by the
 MusicController, which resolves tracks through the Media Sourcing Pipeline and
 plays them through the Arbiter.
 
+The Group Membership Audit watches the same user session for ChatAction updates
+that add or remove Parlay's own account, privately notifying the Operator and
+appending to an Operator-local audit log.
+
 An unexpected call drop is reported to the Operator and ends the session so a
 later join can succeed (REQ-BOT-006).
 
@@ -33,6 +37,9 @@ from .media.po_token import PoTokenProvider
 from .media.resolver import TrackResolver
 from .media.source_selector import SourceSelector
 from .media.transcoder import MediaTranscoder
+from .membership.notifier import MembershipNotifier
+from .membership.store import AuditLogStore
+from .membership.watcher import MembershipWatcher
 from .music.controller import MusicController
 from .session import CallSessionManager, SessionError
 from .voice.ai_producer import AiVoiceProducer
@@ -54,6 +61,7 @@ class ParlayApp:
         self.arbiter: AudioOutputArbiter | None = None
         self.ai: AiVoiceProducer | None = None
         self.music: MusicController | None = None
+        self.membership: MembershipWatcher | None = None
         self._register_commands()
 
     def _register_commands(self) -> None:
@@ -124,6 +132,13 @@ class ParlayApp:
         if session is None:
             return
         await self.client.send_message(session.chat, text)
+
+    async def _notify_operator(self, text: str) -> None:
+        """Send a private message to the Operator's own account.
+
+        Membership alerts go here and never into a triggering chat (ADR-001).
+        """
+        await self.client.send_message(self.config.operator_id, text)
 
     async def _on_ai_speaking(self) -> None:
         """Announce in-call that the AI is speaking (REQ-AIVP-008.1)."""
@@ -262,10 +277,28 @@ class ParlayApp:
         if reply is not None:
             await event.reply(reply)
 
+    async def _on_chat_action(self, event: events.ChatAction.Event) -> None:
+        """Route a ChatAction update to the Group Membership Audit."""
+        if self.membership is None:
+            return
+        try:
+            await self.membership.handle(event)
+        except Exception:
+            log.exception("failed to handle chat action for membership audit")
+
+    def _build_membership(self, self_id: str) -> MembershipWatcher:
+        """Assemble the membership notifier, audit log, and watcher."""
+        notifier = MembershipNotifier(self._notify_operator)
+        store = AuditLogStore(self.config.audit_log_path)
+        return MembershipWatcher(self_id, [notifier, store])
+
     async def run(self) -> None:
         """Start the client and process messages until disconnected."""
         self.client.add_event_handler(self._on_message, events.NewMessage())
+        self.client.add_event_handler(self._on_chat_action, events.ChatAction())
         await self.client.start()
         me = await self.client.get_me()
+        # The Membership Audit keys off Parlay's own account id.
+        self.membership = self._build_membership(str(me.id))
         log.info("Parlay is online as %s", getattr(me, "username", None) or me.id)
         await self.client.run_until_disconnected()
