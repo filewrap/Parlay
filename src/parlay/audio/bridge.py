@@ -77,7 +77,11 @@ class RawAudioBridge:
     def _schedule_disconnect(self) -> None:
         if self._on_disconnect is None or self._loop is None:
             return
-        self._loop.create_task(self._on_disconnect())
+        self._loop.create_task(self._run_disconnect())
+
+    async def _run_disconnect(self) -> None:
+        if self._on_disconnect is not None:
+            await self._on_disconnect()
 
     # --- lifecycle ------------------------------------------------------
     async def start(self, chat: Any) -> None:
