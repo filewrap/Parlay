@@ -23,6 +23,7 @@ class Config:
     api_id: int
     api_hash: str
     session: str
+    string_session: str | None
     operator_id: str
     gemini_api_key: str
     pot_provider_url: str
@@ -63,6 +64,9 @@ def load_config() -> Config:
         api_id=api_id,
         api_hash=_require("TELEGRAM_API_HASH"),
         session=os.environ.get("TELEGRAM_SESSION", "parlay.session").strip(),
+        # A portable StringSession, when provided, takes precedence over the
+        # on-disk session file (ideal for ephemeral hosts). See client.py.
+        string_session=_optional("TELEGRAM_STRING_SESSION"),
         operator_id=_require("OPERATOR_ID"),
         gemini_api_key=_require("GEMINI_API_KEY"),
         pot_provider_url=os.environ.get("POT_PROVIDER_URL", "http://127.0.0.1:4416").strip(),
