@@ -2,8 +2,9 @@
 
 The command handlers drive the CallSessionManager and the RawAudioBridge.
 Join brings up the raw audio bridge; leave tears it down and releases buffers.
-The AI pipeline (WO-3) and music (WO-5/WO-6) plug into the bridge's Captured
-Stream and Playback Sink.
+`/start` engages the AI Voice Pipeline over the bridge's Captured Stream and
+Playback Sink; `/stop` disengages it. Music (WO-5/WO-6) plugs into the same
+bridge later.
 
 All outgoing messages are formatted through the shared presentation layer.
 """
@@ -19,6 +20,9 @@ from .audio.bridge import RawAudioBridge
 from .commands import MUSIC_COMMANDS, CommandHandler, ParsedCommand
 from .config import Config
 from .session import CallSessionManager, SessionError
+from .voice.gemini import GeminiVoiceProvider
+from .voice.provider import ProviderError
+from .voice.session_manager import ProviderSessionManager
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +38,7 @@ class ParlayApp:
         self.sessions = CallSessionManager()
         self.commands = CommandHandler(config.operator_id, config.command_prefix)
         self.bridge: RawAudioBridge | None = None
+        self.pipeline: ProviderSessionManager | None = None
         self._register_commands()
 
     def _register_commands(self) -> None:
@@ -68,16 +73,34 @@ class ParlayApp:
             self.sessions.end()
         except SessionError as exc:
             return fmt.error(str(exc))
+        await self._teardown_pipeline()
         if self.bridge is not None:
             await self.bridge.stop()
             self.bridge = None
         return fmt.success("Left the voice chat.")
 
     async def _cmd_start(self, command: ParsedCommand) -> str:
+        if self.bridge is None:
+            return fmt.error("Join a voice chat first.")
         try:
             self.sessions.engage_ai()
         except SessionError as exc:
             return fmt.error(str(exc))
+        provider = GeminiVoiceProvider(self.config.gemini_api_key)
+        pipeline = ProviderSessionManager(
+            provider,
+            source=self.bridge,
+            sink=self.bridge,
+            on_loss=self._on_pipeline_loss,
+        )
+        try:
+            await pipeline.engage()
+        except ProviderError as exc:
+            # Do not leave the pipeline engaged if the session cannot open.
+            self.sessions.disengage_ai()
+            log.exception("failed to engage AI voice pipeline")
+            return fmt.error(f"Could not engage the AI pipeline: {exc}")
+        self.pipeline = pipeline
         return fmt.success("AI voice pipeline engaged.")
 
     async def _cmd_stop(self, command: ParsedCommand) -> str:
@@ -85,6 +108,7 @@ class ParlayApp:
             self.sessions.disengage_ai()
         except SessionError as exc:
             return fmt.error(str(exc))
+        await self._teardown_pipeline()
         return fmt.success("AI voice pipeline stopped.")
 
     async def _cmd_status(self, command: ParsedCommand) -> str:
@@ -93,6 +117,27 @@ class ParlayApp:
 
     async def _cmd_music_pending(self, command: ParsedCommand) -> str:
         return fmt.warning(_MUSIC_PENDING)
+
+    async def _teardown_pipeline(self) -> None:
+        if self.pipeline is not None:
+            await self.pipeline.disengage()
+            self.pipeline = None
+
+    async def _on_pipeline_loss(self, reason: str) -> None:
+        """Called when the pipeline disengages itself after an unrecoverable loss."""
+        self.pipeline = None
+        try:
+            self.sessions.disengage_ai()
+        except SessionError:
+            pass
+        session = self.sessions.session
+        if session is not None:
+            try:
+                await self.client.send_message(
+                    session.chat, fmt.error(f"AI voice pipeline stopped: {reason}")
+                )
+            except Exception:
+                log.exception("failed to notify Operator of pipeline loss")
 
     async def _on_message(self, event: events.NewMessage.Event) -> None:
         reply = await self.commands.dispatch(event.raw_text, event.sender_id)
