@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -39,14 +38,14 @@ class SessionError(RuntimeError):
 class CallSessionManager:
     """Owns the single active Call Session and its lifecycle."""
 
-    _session: Optional[CallSession] = field(default=None, init=False)
+    _session: CallSession | None = field(default=None, init=False)
 
     @property
     def active(self) -> bool:
         return self._session is not None
 
     @property
-    def session(self) -> Optional[CallSession]:
+    def session(self) -> CallSession | None:
         return self._session
 
     def begin_join(self, chat: str) -> CallSession:
