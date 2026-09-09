@@ -1,0 +1,23 @@
+services:
+  pot-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider:latest
+    container_name: parlay-pot-provider
+    restart: unless-stopped
+    ports:
+      - "4416:4416"
+
+  parlay:
+    build: .
+    container_name: parlay-bot
+    restart: unless-stopped
+    depends_on:
+      - pot-provider
+    env_file:
+      - .env
+    environment:
+      # Reach the provider by its compose service name from inside the network.
+      POT_PROVIDER_URL: http://pot-provider:4416
+    volumes:
+      # Persist the Telethon session file across restarts.
+      - ./data:/app/data
+    working_dir: /app
