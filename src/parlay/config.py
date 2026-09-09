@@ -28,6 +28,9 @@ class Config:
     pot_provider_url: str
     command_prefix: str
     log_level: str
+    gemini_model: str | None
+    gemini_voice: str | None
+    gemini_persona: str | None
 
 
 def _require(name: str) -> str:
@@ -35,6 +38,11 @@ def _require(name: str) -> str:
     if not value:
         raise ConfigError(f"Missing required environment variable: {name}")
     return value
+
+
+def _optional(name: str) -> str | None:
+    value = os.environ.get(name, "").strip()
+    return value or None
 
 
 def load_config() -> Config:
@@ -59,4 +67,7 @@ def load_config() -> Config:
         pot_provider_url=os.environ.get("POT_PROVIDER_URL", "http://127.0.0.1:4416").strip(),
         command_prefix=os.environ.get("COMMAND_PREFIX", "/").strip() or "/",
         log_level=os.environ.get("LOG_LEVEL", "INFO").strip().upper(),
+        gemini_model=_optional("GEMINI_MODEL"),
+        gemini_voice=_optional("GEMINI_VOICE"),
+        gemini_persona=_optional("GEMINI_PERSONA"),
     )
