@@ -114,7 +114,7 @@ async def test_removal_is_recorded() -> None:
 
 
 async def test_kick_of_self_is_recorded_as_removal() -> None:
-    seen, sink = _collector()
+    _seen, sink = _collector()
     watcher = MembershipWatcher("100", [sink])
     event = await watcher.handle(
         FakeChatAction(user_kicked=True, users=[FakeEntity(100)], chat=FakeEntity(-1))
