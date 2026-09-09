@@ -21,8 +21,8 @@ from collections.abc import Awaitable, Callable
 from ..audio.arbiter import AudioOutputArbiter
 from ..audio.frames import Pcm48kFrame
 from ..media.resolver import ResolvedTrack
-from ..media.transcoder import MediaTranscoder
 from ..media.track import TranscodeError
+from ..media.transcoder import MediaTranscoder
 
 log = logging.getLogger(__name__)
 
