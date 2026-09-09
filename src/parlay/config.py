@@ -31,6 +31,7 @@ class Config:
     gemini_model: str | None
     gemini_voice: str | None
     gemini_persona: str | None
+    audit_log_path: str
 
 
 def _require(name: str) -> str:
@@ -70,4 +71,6 @@ def load_config() -> Config:
         gemini_model=_optional("GEMINI_MODEL"),
         gemini_voice=_optional("GEMINI_VOICE"),
         gemini_persona=_optional("GEMINI_PERSONA"),
+        audit_log_path=os.environ.get("AUDIT_LOG_PATH", "parlay-membership.log").strip()
+        or "parlay-membership.log",
     )
