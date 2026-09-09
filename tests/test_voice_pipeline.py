@@ -10,7 +10,15 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 
 from parlay.audio.frames import AudioChunk
-from parlay.voice.provider import ProviderError, ReplyEvent, ReplyEventKind, VoiceProvider
+from parlay.voice.gemini import DEFAULT_MODEL, default_configuration
+from parlay.voice.provider import (
+    ProviderError,
+    ReplyEvent,
+    ReplyEventKind,
+    ResponseModality,
+    SessionConfiguration,
+    VoiceProvider,
+)
 from parlay.voice.session_manager import ProviderSessionManager
 
 
@@ -202,6 +210,71 @@ async def test_unrecoverable_loss_reports_and_disengages() -> None:
     assert not mgr.engaged
     assert reasons  # Operator was notified
     assert bridge.token_released
+
+
+async def test_first_reply_audio_announces_speaking_once_per_turn() -> None:
+    provider = FakeProvider(
+        [
+            ReplyEvent.audio(b"\x02\x00" * 8),
+            ReplyEvent.audio(b"\x02\x00" * 8),
+            ReplyEvent.turn_complete(),
+        ]
+    )
+    bridge = FakeBridge()
+    announces = 0
+
+    async def on_speaking() -> None:
+        nonlocal announces
+        announces += 1
+
+    mgr = ProviderSessionManager(provider, bridge, bridge, on_speaking=on_speaking)
+    await mgr.engage()
+    try:
+        await asyncio.sleep(0.02)
+        # Two audio chunks in one turn announce exactly once (AC-AIVP-008.1).
+        assert announces == 1
+    finally:
+        await mgr.disengage()
+
+
+async def test_speaking_announcement_is_throttled_across_turns() -> None:
+    provider = FakeProvider(
+        [
+            ReplyEvent.audio(b"\x02\x00" * 8),
+            ReplyEvent.turn_complete(),
+            ReplyEvent.audio(b"\x02\x00" * 8),
+            ReplyEvent.turn_complete(),
+        ]
+    )
+    bridge = FakeBridge()
+    announces = 0
+
+    async def on_speaking() -> None:
+        nonlocal announces
+        announces += 1
+
+    mgr = ProviderSessionManager(provider, bridge, bridge, on_speaking=on_speaking)
+    await mgr.engage()
+    try:
+        await asyncio.sleep(0.02)
+        # Two separate turns inside the throttle window announce at most once
+        # so the chat is not flooded (AC-AIVP-008.3).
+        assert announces == 1
+    finally:
+        await mgr.disengage()
+
+
+def test_default_configuration_requests_native_audio() -> None:
+    config = default_configuration()
+    assert config.model == DEFAULT_MODEL
+    assert config.response_modality is ResponseModality.AUDIO
+
+
+def test_session_configuration_defaults_to_audio_modality() -> None:
+    config = SessionConfiguration(model="some-model")
+    assert config.response_modality is ResponseModality.AUDIO
+    assert config.voice is None
+    assert config.system_instruction is None
 
 
 def test_reply_event_kinds() -> None:
