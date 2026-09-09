@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Awaitable, Callable
 
 from .buffers import CaptureQueue
 from .frames import CALL_FRAME_BYTES, AudioChunk, Pcm48kFrame
