@@ -36,7 +36,7 @@ def test_playback_take_pads_with_silence_when_empty() -> None:
 
 def test_playback_take_returns_exact_bytes() -> None:
     pb = PlaybackBuffer()
-    pb.enqueue(Pcm48kFrame(pcm=b"\xAA\xBB" * 500))  # 1000 bytes
+    pb.enqueue(Pcm48kFrame(pcm=b"\xaa\xbb" * 500))  # 1000 bytes
     out = pb.take(400)
     assert len(out) == 400
     # Remaining 600 bytes then padded.
