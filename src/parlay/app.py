@@ -1,8 +1,9 @@
 """Application wiring: builds the Telethon client, registers commands, runs.
 
-This is the control skeleton. Command handlers here return status text and
-drive the CallSessionManager. Actual audio join/capture/playback is wired in by
-later work orders (WO-2, WO-3); music handlers by WO-5/WO-6.
+The command handlers drive the CallSessionManager and the RawAudioBridge.
+Join brings up the raw audio bridge; leave tears it down and releases buffers.
+The AI pipeline (WO-3) and music (WO-5/WO-6) plug into the bridge's Captured
+Stream and Playback Sink.
 
 All outgoing messages are formatted through the shared presentation layer.
 """
@@ -14,6 +15,7 @@ import logging
 from telethon import TelegramClient, events
 
 from . import presentation as fmt
+from .audio.bridge import RawAudioBridge
 from .commands import CommandHandler, MUSIC_COMMANDS, ParsedCommand
 from .config import Config
 from .session import CallSessionManager, SessionError
@@ -24,13 +26,14 @@ _MUSIC_PENDING = "That command is not available yet (implemented in a later work
 
 
 class ParlayApp:
-    """Owns the client, command handler, and session manager."""
+    """Owns the client, command handler, session manager, and audio bridge."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
         self.client = TelegramClient(config.session, config.api_id, config.api_hash)
         self.sessions = CallSessionManager()
         self.commands = CommandHandler(config.operator_id, config.command_prefix)
+        self.bridge: RawAudioBridge | None = None
         self._register_commands()
 
     def _register_commands(self) -> None:
@@ -48,7 +51,15 @@ class ParlayApp:
             self.sessions.begin_join(target)
         except SessionError as exc:
             return fmt.error(str(exc))
-        # Audio join via py-tgcalls is wired in WO-2; mark connected for now.
+        # Bring up the raw audio bridge for this session.
+        bridge = RawAudioBridge(self.client)
+        try:
+            await bridge.start(target)
+        except Exception as exc:  # roll back the session on join failure
+            log.exception("failed to start raw audio bridge")
+            self.sessions.end()
+            return fmt.error(f"Could not join {target}: {exc}")
+        self.bridge = bridge
         self.sessions.mark_connected()
         return fmt.success(f"Joined {target}.")
 
@@ -57,6 +68,9 @@ class ParlayApp:
             self.sessions.end()
         except SessionError as exc:
             return fmt.error(str(exc))
+        if self.bridge is not None:
+            await self.bridge.stop()
+            self.bridge = None
         return fmt.success("Left the voice chat.")
 
     async def _cmd_start(self, command: ParsedCommand) -> str:
