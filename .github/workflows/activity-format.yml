@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   update:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +39,6 @@ jobs:
           if old not in text:
               raise SystemExit('expected stop block not found')
           activity.write_text(text.replace(old, new, 1))
-
           tests = Path('tests/test_activity.py')
           content = tests.read_text()
           content += '''
