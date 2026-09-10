@@ -14,15 +14,24 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip -q install -e . 'fastapi>=0.115,<1' 'uvicorn>=0.30,<1' httpx websockets pytest pytest-asyncio ruff mypy
-      - name: Format scoped files
-        run: ruff format src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
-      - name: Lint scoped files
-        run: ruff check --fix src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
+      - name: Apply scoped format and lint fixes
+        run: |
+          ruff format src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
+          python - <<'PY'
+          from pathlib import Path
+          path=Path('tests/test_rooms_service.py')
+          text=path.read_text().replace('match="capacity|invite-only"','match=r"capacity|invite-only"').replace('match="expired|ended"','match=r"expired|ended"')
+          text=text.replace('    authority = lambda uid, chat: uid == 9\n    member = lambda uid, chat: uid in {9, 10}\n','    def authority(uid, chat):\n        return uid == 9\n\n    def member(uid, chat):\n        return uid in {9, 10}\n')
+          path.write_text(text)
+          PY
+          ruff check --fix src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
+          ruff format src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
       - run: ruff format --check src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
       - run: ruff check src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
       - run: mypy src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
       - run: pytest -q tests/test_rooms_service.py tests/test_rooms_gateway.py
       - name: Commit formatter output
+        if: always()
         run: |
           if ! git diff --quiet; then
             git config user.name 'Alex C11'
