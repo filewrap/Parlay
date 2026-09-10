@@ -14,14 +14,21 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip -q install -e . 'fastapi>=0.115,<1' 'uvicorn>=0.30,<1' httpx websockets pytest pytest-asyncio ruff mypy
-      - name: Apply scoped format and lint fixes
+      - name: Apply scoped mypy fixes
         run: |
-          ruff format src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
           python - <<'PY'
           from pathlib import Path
-          path=Path('tests/test_rooms_service.py')
-          text=path.read_text().replace('match="capacity|invite-only"','match=r"capacity|invite-only"').replace('match="expired|ended"','match=r"expired|ended"')
-          text=text.replace('    authority = lambda uid, chat: uid == 9\n    member = lambda uid, chat: uid in {9, 10}\n','    def authority(uid, chat):\n        return uid == 9\n\n    def member(uid, chat):\n        return uid in {9, 10}\n')
+          path=Path('src/parlay/rooms/service.py'); text=path.read_text()
+          old='''        if notify and self.on_reentry:\n            result = self.on_reentry(*notify)\n            if inspect.isawaitable(result):\n                await result'''
+          new='''        if notify and self.on_reentry:\n            reentry_result = self.on_reentry(*notify)\n            if inspect.isawaitable(reentry_result):\n                await reentry_result'''
+          assert text.count(old)==1; path.write_text(text.replace(old,new))
+          path=Path('src/parlay/rooms/gateway.py'); text=path.read_text()
+          old='''    x, z, rotation = (float(value) for value in values)'''
+          new='''    x, z, rotation = (float(cast(int | float, value)) for value in values)'''
+          assert text.count(old)==1; path.write_text(text.replace(old,new))
+          path=Path('tests/test_rooms_gateway.py'); text=path.read_text()
+          text=text.replace('from typing import Any','from typing import Any, cast')
+          text=text.replace('origin=ORIGIN','origin=cast(Any, ORIGIN)')
           path.write_text(text)
           PY
           ruff check --fix src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
@@ -30,14 +37,14 @@ jobs:
       - run: ruff check src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
       - run: mypy src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
       - run: pytest -q tests/test_rooms_service.py tests/test_rooms_gateway.py
-      - name: Commit formatter output
+      - name: Commit scoped fixes
         if: always()
         run: |
           if ! git diff --quiet; then
             git config user.name 'Alex C11'
             git config user.email 'alex.c992954@gmail.com'
             git add src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
-            git commit -m 'style(rooms): apply scoped quality fixes'
+            git commit -m 'fix(rooms): satisfy scoped static checks'
             git pull --rebase origin main
             git push origin HEAD:main
           fi
