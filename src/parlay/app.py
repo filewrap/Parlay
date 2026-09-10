@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import sqlite3
 import time
@@ -429,13 +430,15 @@ class ParlayApp:
             if self.rooms is not None:
                 await self.rooms.end_group(chat_id, "terminal_connection_failure")
         finally:
-            self._recoveries.pop(chat_id, None)
+            task = asyncio.current_task()
+            if self._recoveries.get(chat_id) is task:
+                self._recoveries.pop(chat_id, None)
 
     async def _queue_activity_unavailable(self, chat_id: int, reason: str) -> None:
         runtime = self.registry.get(chat_id)
 
         async def apply() -> None:
-            if runtime is not None and self.registry.get(chat_id) is not runtime:
+            if self.registry.get(chat_id) is not runtime:
                 return
             if reason == "media_revoked" and runtime is not None:
                 await runtime.command("pause")
@@ -507,14 +510,43 @@ class ParlayApp:
                 await self.rooms.set_recovering(chat_id, "verification_unavailable")
                 self._recoveries[chat_id] = self._spawn(self._recover(chat_id))
 
-    async def run(self) -> None:
-        await start_authorized(self.client)
-        server_task = None
+    @staticmethod
+    def _operator_reference(operator_id: str) -> str | int:
+        return int(operator_id) if operator_id.isdecimal() else operator_id
+
+    async def _cleanup_step(self, name: str, action: Any) -> None:
         try:
+            result = action()
+            if inspect.isawaitable(result):
+                await result
+        except BaseException:
+            log.exception("Cleanup step failed: %s", name)
+
+    async def _shutdown_server(self, server_task: asyncio.Task[Any] | None) -> None:
+        if self._server is not None:
+            self._server.should_exit = True
+        if server_task is None:
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(server_task), timeout=15)
+        except TimeoutError:
+            log.warning("Room gateway did not stop within 15 seconds; cancelling it")
+            server_task.cancel()
+            await asyncio.gather(server_task, return_exceptions=True)
+        except BaseException:
+            log.exception("Room gateway shutdown failed")
+
+    async def run(self) -> None:
+        server_task: asyncio.Task[Any] | None = None
+        waiters: list[asyncio.Task[Any]] = []
+        try:
+            await start_authorized(self.client)
             me = await self.client.get_me()
             self._account_id = me.id
             self.commands.set_account(me.id, getattr(me, "username", None))
-            operator = await self.client.get_entity(self.config.operator_id)
+            operator = await self.client.get_entity(
+                self._operator_reference(self.config.operator_id)
+            )
             self.commands.set_operator_id(str(operator.id))
             self._operator_peer = await self.client.get_input_entity(operator)
             self.activity = ActivityTracker(
@@ -579,40 +611,42 @@ class ParlayApp:
             else:
                 log.warning("BOT_TOKEN is absent: companion bot and room gateway are disabled")
                 await self.compass.start()
-            waiters = [asyncio.create_task(self.client.run_until_disconnected())]
+            waiters.append(asyncio.create_task(self.client.run_until_disconnected()))
             if server_task is not None:
                 waiters.append(server_task)
             if self.bot is not None and self.bot.client is not None:
                 waiters.append(asyncio.create_task(self.bot.client.run_until_disconnected()))
-            try:
-                done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
-                for task in done:
-                    task.result()
-            finally:
-                if self._server is not None:
-                    self._server.should_exit = True
-                for task in waiters:
-                    if task is not server_task:
-                        task.cancel()
-                await asyncio.gather(*waiters, return_exceptions=True)
+            done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
         finally:
             self._shutting_down = True
-            self.command_wrapper.uninstall()
-            self.client.remove_event_handler(self._on_raw_update)
-            self.client.remove_event_handler(self._on_chat_action)
+            for task in waiters:
+                if task is not server_task:
+                    task.cancel()
+            await asyncio.gather(
+                *(task for task in waiters if task is not server_task), return_exceptions=True
+            )
+            await self._shutdown_server(server_task)
+            await self._cleanup_step("command wrapper", self.command_wrapper.uninstall)
+            await self._cleanup_step(
+                "raw update handler", lambda: self.client.remove_event_handler(self._on_raw_update)
+            )
+            await self._cleanup_step(
+                "chat action handler",
+                lambda: self.client.remove_event_handler(self._on_chat_action),
+            )
             for task in tuple(self._jobs):
                 task.cancel()
             await asyncio.gather(*tuple(self._jobs), return_exceptions=True)
-            try:
-                await self.registry.close()
-            finally:
-                if self.compass is not None:
-                    await self.compass.stop()
-                if self.bot is not None:
-                    await self.bot.stop()
-                if self.rooms is not None:
-                    await self.rooms.stop()
-                self._activity_ready = False
-                if self.activity is not None:
-                    await self.activity.stop()
-                await self.client.disconnect()
+            await self._cleanup_step("runtime registry", self.registry.close)
+            if self.compass is not None:
+                await self._cleanup_step("Compass", self.compass.stop)
+            if self.bot is not None:
+                await self._cleanup_step("companion bot", self.bot.stop)
+            if self.rooms is not None:
+                await self._cleanup_step("room service", self.rooms.stop)
+            self._activity_ready = False
+            if self.activity is not None:
+                await self._cleanup_step("activity tracker", self.activity.stop)
+            await self._cleanup_step("Telegram client", self.client.disconnect)
