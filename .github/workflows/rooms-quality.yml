@@ -14,31 +14,20 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip -q install -e . 'fastapi>=0.115,<1' 'uvicorn>=0.30,<1' httpx websockets pytest pytest-asyncio ruff mypy
-      - name: Apply hardening fixes
+      - name: Correct test setup
         run: |
           python - <<'PY'
           from pathlib import Path
-          path=Path('src/parlay/rooms/service.py'); text=path.read_text()
-          old='''        elif action == "kick":\n            target = self._target(payload)\n            if not (owner or moderator) or target == row["owner_id"]:\n                raise RoomError("moderation_forbidden", "This member cannot be removed", 403)\n            data["members"] = [m for m in data["members"] if m["user_id"] != target]'''
-          new='''        elif action == "kick":\n            target = self._target(payload)\n            target_member = next(\n                (item for item in data["members"] if item["user_id"] == target), None\n            )\n            protected_moderator = (\n                moderator\n                and target_member is not None\n                and target_member["role"] in {"owner", "moderator"}\n            )\n            if not (owner or moderator) or target == row["owner_id"] or protected_moderator:\n                raise RoomError("moderation_forbidden", "This member cannot be removed", 403)\n            data["members"] = [m for m in data["members"] if m["user_id"] != target]'''
-          assert text.count(old)==1; text=text.replace(old,new)
-          old='''    def _expire_due(self):\n        with self._connect() as db:\n            db.execute(\n                "UPDATE rooms SET state='ended',end_reason='expired',revision=revision+1 WHERE kind='personal' AND state!='ended' AND expires_at IS NOT NULL AND expires_at<=?",\n                (time.time(),),\n            )'''
-          new='''    def _expire_due(self):\n        now = time.time()\n        with self._connect() as db:\n            rows = db.execute(\n                "SELECT id,expires_at,data_json FROM rooms "\n                "WHERE kind='personal' AND state!='ended'"\n            ).fetchall()\n            expired = []\n            for row in rows:\n                data = json.loads(row["data_json"])\n                expires_at = data.get("expires_override", row["expires_at"])\n                if expires_at is not None and expires_at <= now:\n                    expired.append((row["id"],))\n            db.executemany(\n                "UPDATE rooms SET state='ended',end_reason='expired',"\n                "revision=revision+1 WHERE id=? AND state!='ended'",\n                expired,\n            )'''
-          assert text.count(old)==1; path.write_text(text.replace(old,new))
           path=Path('tests/test_rooms_service.py'); text=path.read_text()
-          text += '''\n\n@pytest.mark.asyncio\nasync def test_duration_override_expires_on_background_sweep(tmp_path):\n    service = RoomService(tmp_path / "rooms.db")\n    room = await service.create_personal(1, duration=600)\n    room = await service.action(\n        room["id"], 1, "shorten", room["revision"], "settings", {"duration": 300}\n    )\n    with service._connect() as db:\n        row = db.execute("SELECT data_json FROM rooms WHERE id=?", (room["id"],)).fetchone()\n        data = __import__("json").loads(row["data_json"])\n        data["expires_override"] = time.time() - 1\n        db.execute(\n            "UPDATE rooms SET data_json=? WHERE id=?",\n            (__import__("json").dumps(data), room["id"]),\n        )\n    service._expire_due()\n    with pytest.raises(RoomError, match=r"expired|ended"):\n        await service.snapshot(room["id"], 1)\n\n\n@pytest.mark.asyncio\nasync def test_moderator_cannot_kick_another_moderator(tmp_path):\n    service = RoomService(tmp_path / "rooms.db")\n    room = await service.create_personal(1, 2, 3)\n    room = await service.join(room["id"], user(2))\n    room = await service.join(room["id"], user(3))\n    room = await service.action(\n        room["id"], 1, "mod-2", room["revision"], "moderator", {"user_id": 2, "enabled": True}\n    )\n    room = await service.action(\n        room["id"], 1, "mod-3", room["revision"], "moderator", {"user_id": 3, "enabled": True}\n    )\n    with pytest.raises(RoomError, match="cannot be removed"):\n        await service.action(room["id"], 2, "kick-3", room["revision"], "kick", {"user_id": 3})\n'''
-          path.write_text(text)
-          path=Path('docs/rooms-api.md'); text=path.read_text()
-          old='''Create the ASGI application with `create_app(service, bot_token, allowed_origins, compass=None, search=None)`. Startup refuses an empty bot token or an empty/non-explicit origin list.'''
-          new='''Create the ASGI application with `create_app(service, bot_token, allowed_origins, compass=None, search=None)`. The gateway does not start or stop `RoomService`; the parent owns that lifecycle. Startup refuses an empty bot token or an empty/non-explicit origin list.'''
+          old='''    room = await service.create_personal(1, 2, 3)\n    room = await service.join(room["id"], user(2))\n    room = await service.join(room["id"], user(3))'''
+          new='''    room = await service.create_personal(1, 2, 3, capacity=3)\n    room = await service.join(room["id"], user(2))\n    room = await service.join(room["id"], user(3))'''
           assert text.count(old)==1; path.write_text(text.replace(old,new))
           PY
-          ruff check --fix src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
-          ruff format src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
+          ruff format tests/test_rooms_service.py
           git config user.name 'Alex C11'
           git config user.email 'alex.c992954@gmail.com'
-          git add src/parlay/rooms tests/test_rooms_service.py docs/rooms-api.md
-          git commit -m 'fix(rooms): harden expiry and moderator boundaries'
+          git add tests/test_rooms_service.py
+          git commit -m 'test(rooms): provision moderator boundary room capacity'
           git pull --rebase origin main
           git push origin HEAD:main
       - run: ruff format --check src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
