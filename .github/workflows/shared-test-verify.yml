@@ -4,7 +4,7 @@ on:
     branches: [main]
     paths: ['.github/workflows/shared-test-verify.yml']
 permissions:
-  contents: write
+  contents: read
 jobs:
   shared-test-verify:
     runs-on: ubuntu-latest
@@ -13,26 +13,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Correct and format scoped test
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          path = Path('tests/test_shared_integration.py')
-          text = path.read_text()
-          old = '''        current_view = joined.json()
-          assert current_view["permissions"]["control"] is True
-'''
-          new = '''        admitted = joined.json()
-          current_view = (
-              await client.get(f"/api/rooms/{room['id']}", headers=current_owner)
-          ).json()
-          assert admitted["id"] == room["id"]
-          assert current_view["permissions"]["control"] is True
-'''
-          if old in text:
-              path.write_text(text.replace(old, new, 1))
-          PY
-          ruff format tests/test_shared_integration.py
       - name: Install
         run: pip install -e '.[dev]' -q
       - name: Verify scoped shared integration test
@@ -40,12 +20,3 @@ jobs:
           ruff check tests/test_shared_integration.py
           ruff format --check tests/test_shared_integration.py
           pytest -q tests/test_shared_integration.py
-      - name: Commit corrected scoped test
-        run: |
-          if ! git diff --quiet -- tests/test_shared_integration.py; then
-            git config user.name 'Alex C11'
-            git config user.email 'alex.c992954@gmail.com'
-            git add tests/test_shared_integration.py
-            git commit -m 'test: read live group authority after admission'
-            git push origin HEAD:main
-          fi
