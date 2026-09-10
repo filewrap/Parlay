@@ -9,11 +9,12 @@ registry = RuntimeRegistry(
     client,
     config,
     on_playback=async_callback,  # (chat_id, snapshot)
-    on_closed=async_callback,    # (chat_id, reason)
-    on_transport=async_callback, # (chat_id, connected)
+    on_closed=async_callback,  # (chat_id, reason)
+    on_transport=async_callback,  # (chat_id, connected)
 )
 
 runtime = await registry.join(chat_or_entity)
+runtime.bind_call_id(input_group_call.id)
 runtime = registry.get(chat_id)
 snapshot = await registry.command(chat_id, action, payload)
 await registry.leave(chat_id, reason="left")
@@ -24,11 +25,19 @@ A runtime exposes `sessions`, `bridge`, `arbiter`, `music`, `ai`, `chat_id`,
 `generation`, and `call_id`. `ai` starts as `None`; parent integration can attach
 one independent AI producer to each runtime.
 
+`call_id` is `None` when `join` returns. The parent already checks the active
+voice chat, so it must call `runtime.bind_call_id(input_group_call.id)` with the
+actual positive Telegram `InputGroupCall.id`. Rebinding the same ID is safe.
+Binding another ID fails. The registry does not invent a call identifier and does
+not repeat the parent's active-call check. `generation` is the internal stale
+event discriminator.
+
 Supported actions are `play`, `force_play`, `pause`, `resume`, `skip`, `stop`,
 `queue`, and `snapshot`. `play` accepts one request string, a list of request
 strings, or `{"queue": [...]}`. A play command creates the runtime first, so the
 voice chat must already be live. `force_play` replaces the current track and
-keeps the pending queue.
+keeps the pending queue. Runtime play APIs propagate resolution and media errors;
+a failed play does not return an unchanged snapshot as success.
 
 ## Isolation and limits
 
@@ -48,7 +57,10 @@ chat. The adapter matches the PyTgCalls 2.3.x API backed by NTgCalls 2.x:
 `StreamFrames`, `ChatUpdate.Status.LEFT_CALL`, and `leave_call`.
 
 Generation checks reject late disconnect and playback events from an old runtime.
-Stopping one runtime does not stop the shared engine or another chat.
+Stopping one runtime does not stop the shared engine or another chat. Close is
+serialized against commands. AI, music, bridge, and session cleanup are all
+attempted even when an earlier stage fails. A terminal runtime is removed before
+transport and close callbacks run. Registry close waits for retained callbacks.
 
 ## Playback snapshots
 
@@ -86,10 +98,10 @@ and includes pending queue metadata. It does not restore a Telegram transport,
 resolved stream URL, or live playback after restart. Parent integration decides
 whether to re-resolve and replay persisted requests.
 
-Direct HTTP and HTTPS requests are resolved before media lookup. Any loopback,
-private, link-local, multicast, reserved, or otherwise non-global address is
-rejected. Search text and existing public operator sources continue through the
-normal resolver.
+Search text continues through the normal resolver. Direct URLs must use HTTPS and
+one of the explicit YouTube hosts. DNS results must also be public addresses.
+Other direct URL hosts, HTTP URLs, and local or special-use destinations fail
+before media resolution. The parent remains responsible for room authorization.
 
 Callbacks are best-effort. Exceptions are logged and do not stop playback.
 `on_closed` and transport callbacks run after lifecycle locks are released.
