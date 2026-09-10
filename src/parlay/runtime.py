@@ -145,8 +145,6 @@ class Runtime:
                     if first_error is None:
                         first_error = exc
 
-        # Playback observers can re-enter the runtime. Wait only after releasing
-        # the command lock, where they fail promptly against the closed state.
         await self.music.wait_for_observer()
         if first_error is not None:
             raise first_error
@@ -280,8 +278,6 @@ class RuntimeRegistry:
                         self._runtimes.pop(chat_id, None)
                         removed = True
         if removed:
-            # Terminal observers are scheduled only after all lifecycle locks are
-            # released and after the runtime is absent from the registry.
             self._notify(self._on_transport, chat_id, False)
             self._notify(self._on_closed, chat_id, reason)
         if cleanup_error is not None:
@@ -298,7 +294,7 @@ class RuntimeRegistry:
         await self._wait_for_callbacks()
         errors = [result for result in results if isinstance(result, BaseException)]
         if errors:
-            raise ExceptionGroup("one or more runtimes failed to close", errors)
+            raise BaseExceptionGroup("one or more runtimes failed to close", errors)
 
     async def _wait_for_callbacks(self) -> None:
         while self._callback_tasks:
