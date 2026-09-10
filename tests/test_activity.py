@@ -24,7 +24,11 @@ def make_chat(chat_id: int) -> types.Chat:
 
 
 def participant(
-    *, left: bool = False, muted: bool = False, can_self_unmute: bool = True
+    *,
+    left: bool = False,
+    muted: bool = False,
+    can_self_unmute: bool = True,
+    just_joined: bool = False,
 ) -> types.GroupCallParticipant:
     return types.GroupCallParticipant(
         peer=types.PeerUser(7),
@@ -33,6 +37,7 @@ def participant(
         left=left,
         muted=muted,
         can_self_unmute=can_self_unmute,
+        just_joined=just_joined,
         is_self=True,
     )
 
@@ -105,6 +110,8 @@ async def test_start_discovers_call_and_uses_targeted_self_request(tmp_path) -> 
     seen, callback = callback_collector()
     tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
     await tracker.start()
+    if tracker._discovery_task is not None:
+        await tracker._discovery_task
     try:
         assert await tracker.status_text(chat_id) == (
             "Voice chat active; account joined; media transport disconnected."
@@ -120,6 +127,8 @@ async def test_absent_before_join_does_not_notify(tmp_path) -> None:
     seen, callback = callback_collector()
     tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
     await tracker.start()
+    if tracker._discovery_task is not None:
+        await tracker._discovery_task
     try:
         assert "account not joined" in await tracker.status_text(chat_id)
         assert seen == []
@@ -134,6 +143,8 @@ async def test_join_leave_and_duplicate_removal_are_deduplicated(tmp_path) -> No
     seen, callback = callback_collector()
     tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
     await tracker.start()
+    if tracker._discovery_task is not None:
+        await tracker._discovery_task
     try:
         client.participants[11] = []
         removal = types.UpdateGroupCallParticipants(
@@ -159,6 +170,8 @@ async def test_discard_clears_transport_and_notifies_once(tmp_path) -> None:
     seen, callback = callback_collector()
     tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
     await tracker.start()
+    if tracker._discovery_task is not None:
+        await tracker._discovery_task
     try:
         await tracker.set_transport(chat_id, True)
         update = types.UpdateGroupCall(
@@ -183,6 +196,8 @@ async def test_different_chats_are_isolated(tmp_path) -> None:
     seen, callback = callback_collector()
     tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
     await tracker.start()
+    if tracker._discovery_task is not None:
+        await tracker._discovery_task
     try:
         await tracker.set_transport(first, True)
         assert "account joined" in await tracker.status_text(first)
@@ -225,6 +240,8 @@ async def test_rpc_failure_marks_unknown_without_false_leave(tmp_path) -> None:
     seen, callback = callback_collector()
     tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
     await tracker.start()
+    if tracker._discovery_task is not None:
+        await tracker._discovery_task
     try:
         assert await tracker.status_text(chat_id) == (
             "Voice chat state unknown; account participation unknown; media transport disconnected."
@@ -241,6 +258,8 @@ async def test_version_gap_coalesces_reconciliation(tmp_path) -> None:
     seen, callback = callback_collector()
     tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
     await tracker.start()
+    if tracker._discovery_task is not None:
+        await tracker._discovery_task
     try:
         before = sum(
             isinstance(item, functions.phone.GetGroupParticipantsRequest)
@@ -296,6 +315,8 @@ async def test_media_revoke_notifies_once_and_recovery_clears_reason(tmp_path) -
     seen, callback = callback_collector()
     tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
     await tracker.start()
+    if tracker._discovery_task is not None:
+        await tracker._discovery_task
     try:
         revoked = types.UpdateGroupCallParticipants(
             call=types.InputGroupCall(id=11, access_hash=110),
@@ -333,6 +354,8 @@ async def test_concurrent_transport_and_participant_save_merge_fields(tmp_path) 
     _seen, callback = callback_collector()
     tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
     await tracker.start()
+    if tracker._discovery_task is not None:
+        await tracker._discovery_task
     try:
         previous = await tracker._get(chat_id)
         await asyncio.gather(
@@ -382,6 +405,8 @@ async def test_stale_discarded_call_does_not_overwrite_new_call(tmp_path) -> Non
     seen, callback = callback_collector()
     tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
     await tracker.start()
+    if tracker._discovery_task is not None:
+        await tracker._discovery_task
     try:
         await tracker._save(
             chat_id,
@@ -414,6 +439,8 @@ async def test_stale_group_call_version_does_not_regress_state(tmp_path) -> None
     _seen, callback = callback_collector()
     tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
     await tracker.start()
+    if tracker._discovery_task is not None:
+        await tracker._discovery_task
     try:
         await tracker._save(chat_id, version=5)
         stale = SimpleNamespace(
@@ -424,5 +451,130 @@ async def test_stale_group_call_version_does_not_regress_state(tmp_path) -> None
         state = await tracker._get(chat_id)
         assert state is not None
         assert state.version == 5
+    finally:
+        await tracker.stop()
+
+
+async def test_start_returns_before_discovery_rpc(tmp_path) -> None:
+    client = FakeClient()
+    setup_chat(client, 101, 11)
+    gate = asyncio.Event()
+
+    async def blocked_dialogs():
+        client.dialog_iterations += 1
+        await gate.wait()
+        if False:
+            yield None
+
+    client.iter_dialogs = blocked_dialogs
+    _seen, callback = callback_collector()
+    tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
+    await asyncio.wait_for(tracker.start(), timeout=1)
+    try:
+        assert tracker._discovery_task is not None
+        assert not tracker._discovery_task.done()
+    finally:
+        gate.set()
+        await tracker.stop()
+
+
+async def test_start_discovery_does_not_duplicate_reconcile(tmp_path) -> None:
+    client = FakeClient()
+    setup_chat(client, 101, 11)
+    _seen, callback = callback_collector()
+    tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
+    await tracker.start()
+    try:
+        assert tracker._discovery_task is not None
+        await tracker._discovery_task
+        full = sum(
+            isinstance(item, functions.messages.GetFullChatRequest) for item in client.requests
+        )
+        participants = sum(
+            isinstance(item, functions.phone.GetGroupParticipantsRequest)
+            for item in client.requests
+        )
+        assert full == 1
+        assert participants == 1
+    finally:
+        await tracker.stop()
+
+
+async def test_failed_discovery_retries_only_after_retry_interval(tmp_path) -> None:
+    client = FakeClient()
+
+    async def failed_dialogs():
+        client.dialog_iterations += 1
+        raise RuntimeError("dialogs unavailable")
+        yield
+
+    client.iter_dialogs = failed_dialogs
+    _seen, callback = callback_collector()
+    tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
+    tracker._DISCOVERY_RETRY_SECONDS = 0
+    tracker._RECONCILE_SECONDS = 0.01
+    await tracker.start()
+    try:
+        assert tracker._discovery_task is not None
+        await tracker._discovery_task
+        assert tracker._discovery_failed is True
+        await asyncio.sleep(0.03)
+        assert client.dialog_iterations >= 2
+    finally:
+        await tracker.stop()
+
+
+async def test_left_and_just_joined_use_version_rules(tmp_path) -> None:
+    client = FakeClient()
+    chat_id = setup_chat(client, 101, 11)
+    client.participants[11] = [participant()]
+    _seen, callback = callback_collector()
+    tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
+    await tracker.start()
+    if tracker._discovery_task is not None:
+        await tracker._discovery_task
+    try:
+        await tracker._save(chat_id, version=5, membership="joined")
+        await tracker.handle_update(
+            types.UpdateGroupCallParticipants(
+                call=types.InputGroupCall(id=11, access_hash=110),
+                participants=[participant(left=True)],
+                version=4,
+            )
+        )
+        state = await tracker._get(chat_id)
+        assert state is not None and state.membership == "joined"
+        await tracker.handle_update(
+            types.UpdateGroupCallParticipants(
+                call=types.InputGroupCall(id=11, access_hash=110),
+                participants=[participant(just_joined=True)],
+                version=7,
+            )
+        )
+        assert chat_id in tracker._reconcile_tasks
+    finally:
+        await tracker.stop()
+
+
+async def test_old_active_call_schedules_reconcile_without_replacing(tmp_path) -> None:
+    client = FakeClient()
+    chat_id = setup_chat(client, 101, 11)
+    _seen, callback = callback_collector()
+    tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
+    await tracker.start()
+    if tracker._discovery_task is not None:
+        await tracker._discovery_task
+    scheduled: list[int] = []
+    tracker._schedule_reconcile = scheduled.append
+    try:
+        await tracker._save(chat_id, call_id=22, access_hash=220, version=5)
+        stale = SimpleNamespace(
+            call=SimpleNamespace(id=11, access_hash=110, version=6),
+            peer=types.PeerChat(chat_id=101),
+        )
+        await tracker._handle_group_call(stale)
+        state = await tracker._get(chat_id)
+        assert state is not None and state.call_id == 22
+        assert scheduled == [chat_id]
     finally:
         await tracker.stop()

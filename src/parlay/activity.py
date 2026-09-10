@@ -48,6 +48,7 @@ class ActivityTracker:
     """
 
     _RECONCILE_SECONDS = 60.0
+    _DISCOVERY_RETRY_SECONDS = 300.0
     _DISCOVERY_CONCURRENCY = 4
 
     def __init__(
@@ -70,6 +71,7 @@ class ActivityTracker:
         self._reconcile_tasks: dict[int, asyncio.Task[None]] = {}
         self._discovery_task: asyncio.Task[None] | None = None
         self._last_discovery_at = 0.0
+        self._discovery_failed = False
 
     async def start(self) -> None:
         """Open storage, clear stale transport, discover calls, and reconcile."""
@@ -83,10 +85,8 @@ class ActivityTracker:
                 (int(time.time()), self._account_id),
             )
             self._started = True
-        await self._discover_dialogs()
-        for chat_id in await self._known_active_chats():
-            await self._reconcile_safely(chat_id)
         if self._started and not self._stopping:
+            self._schedule_discovery(force=True)
             self._periodic_task = asyncio.create_task(
                 self._periodic_reconcile(), name="parlay-activity-periodic"
             )
@@ -385,6 +385,9 @@ class ActivityTracker:
             )
             await self._notify_once(chat_id, "call_discarded", previous)
         else:
+            if previous is not None and previous.call_id not in (None, call_id):
+                self._schedule_reconcile(chat_id)
+                return
             update_version = getattr(update.call, "version", None)
             if (
                 previous is not None
@@ -412,7 +415,12 @@ class ActivityTracker:
             self._schedule_discovery()
             return
         own = next((item for item in update.participants if self._is_self(item)), None)
-        if own is not None and not bool(getattr(own, "versioned", False)):
+        version_triggered = any(
+            bool(getattr(item, flag, False))
+            for item in update.participants
+            for flag in ("versioned", "left", "just_joined")
+        )
+        if own is not None and not version_triggered:
             await self._apply_self(state.chat_id, own, update.version, state)
             return
         if state.version is None:
@@ -597,20 +605,23 @@ class ActivityTracker:
                 jobs.append(inspect())
             if jobs:
                 await asyncio.gather(*jobs)
+            self._discovery_failed = False
         except asyncio.CancelledError:
             raise
         except Exception:
+            self._discovery_failed = True
             log.warning("activity dialog discovery failed", exc_info=True)
 
-    def _schedule_discovery(self) -> None:
+    def _schedule_discovery(self, *, force: bool = False) -> None:
         if self._stopping or not self._started:
             return
-        now = time.monotonic()
-        if now - self._last_discovery_at < 0.1:
-            return
-        self._last_discovery_at = now
         if self._discovery_task is not None and not self._discovery_task.done():
             return
+        now = time.monotonic()
+        cooldown = 0.1 if not force else 0.0
+        if now - self._last_discovery_at < cooldown:
+            return
+        self._last_discovery_at = now
         self._discovery_task = asyncio.create_task(
             self._discover_dialogs(), name="parlay-activity-discovery"
         )
@@ -638,6 +649,11 @@ class ActivityTracker:
             await asyncio.sleep(self._RECONCILE_SECONDS)
             for chat_id in await self._known_active_chats():
                 self._schedule_reconcile(chat_id)
+            if (
+                self._discovery_failed
+                and time.monotonic() - self._last_discovery_at >= self._DISCOVERY_RETRY_SECONDS
+            ):
+                self._schedule_discovery(force=True)
 
     async def _reconcile_safely(self, chat_id: int) -> None:
         try:
