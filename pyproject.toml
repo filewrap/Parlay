@@ -5,7 +5,8 @@ description = "A thin bridge between ntgcalls and Gemini Live, wired into a Tele
 requires-python = ">=3.11"
 dependencies = [
     "telethon>=1.36",
-    "py-tgcalls>=2.1",
+    "py-tgcalls>=2.3,<3",
+    "ntgcalls>=2.2,<3",
     "google-genai>=0.3",
     "yt-dlp>=2024.8.6",
     "numpy>=1.26",
