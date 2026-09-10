@@ -588,7 +588,7 @@ def _accept_movement(
         for value in values
     ):
         return
-    x, z, rotation = (float(value) for value in values)
+    x, z, rotation = (float(cast(int | float, value)) for value in values)
     if abs(x) > 1_000 or abs(z) > 1_000 or abs(rotation) > math.tau * 4:
         return
     sequence = message.get("seq")

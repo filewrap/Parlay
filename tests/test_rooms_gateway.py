@@ -10,7 +10,7 @@ import socket
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlencode
 
 import httpx
@@ -183,10 +183,12 @@ async def test_real_two_client_cross_updates_movement_kick_and_ticket_replay(tmp
         second_ticket = await ticket(client, second, room["id"])
         async with (
             websockets.connect(
-                f"{ws_url}/api/rooms/{room['id']}/ws?ticket={first_ticket}", origin=ORIGIN
+                f"{ws_url}/api/rooms/{room['id']}/ws?ticket={first_ticket}",
+                origin=cast(Any, ORIGIN),
             ) as first_ws,
             websockets.connect(
-                f"{ws_url}/api/rooms/{room['id']}/ws?ticket={second_ticket}", origin=ORIGIN
+                f"{ws_url}/api/rooms/{room['id']}/ws?ticket={second_ticket}",
+                origin=cast(Any, ORIGIN),
             ) as second_ws,
         ):
             await receive_type(first_ws, "snapshot")
@@ -238,7 +240,8 @@ async def test_real_two_client_cross_updates_movement_kick_and_ticket_replay(tmp
             assert closed.value.code == 1008
         with pytest.raises(Exception):
             async with websockets.connect(
-                f"{ws_url}/api/rooms/{room['id']}/ws?ticket={first_ticket}", origin=ORIGIN
+                f"{ws_url}/api/rooms/{room['id']}/ws?ticket={first_ticket}",
+                origin=cast(Any, ORIGIN),
             ):
                 pass
 
@@ -255,7 +258,7 @@ async def test_websocket_session_expiry_disconnects_receiver(tmp_path: Any) -> N
         owner = await authenticate(client, 1)
         ws_ticket = await ticket(client, owner, room["id"])
         async with websockets.connect(
-            f"{ws_url}/api/rooms/{room['id']}/ws?ticket={ws_ticket}", origin=ORIGIN
+            f"{ws_url}/api/rooms/{room['id']}/ws?ticket={ws_ticket}", origin=cast(Any, ORIGIN)
         ) as connection:
             await receive_type(connection, "snapshot")
             with app.state.rooms.connect() as db:

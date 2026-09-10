@@ -332,9 +332,9 @@ class RoomService:
                 await self.publish_playback(playback_call[0], result)
                 output = await self.snapshot(room_id, user_id)
         if notify and self.on_reentry:
-            result = self.on_reentry(*notify)
-            if inspect.isawaitable(result):
-                await result
+            reentry_result = self.on_reentry(*notify)
+            if inspect.isawaitable(reentry_result):
+                await reentry_result
         self._publish(room_id, output)
         return output
 
