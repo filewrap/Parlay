@@ -1,6 +1,6 @@
 name: lifecycle-verify
 
-on:
+'on':
   workflow_dispatch:
 
 permissions:
@@ -28,24 +28,12 @@ jobs:
           source = path.read_text()
           source = source.replace("import asyncio\nimport logging\n", "import asyncio\nimport inspect\nimport logging\n")
           source = source.replace(
-              """        finally:
-            self._recoveries.pop(chat_id, None)
-""",
-              """        finally:
-            task = asyncio.current_task()
-            if self._recoveries.get(chat_id) is task:
-                self._recoveries.pop(chat_id, None)
-""",
+              "        finally:\n            self._recoveries.pop(chat_id, None)\n",
+              "        finally:\n            task = asyncio.current_task()\n            if self._recoveries.get(chat_id) is task:\n                self._recoveries.pop(chat_id, None)\n",
           )
           source = source.replace(
-              """        async def apply() -> None:
-            if runtime is not None and self.registry.get(chat_id) is not runtime:
-                return
-""",
-              """        async def apply() -> None:
-            if self.registry.get(chat_id) is not runtime:
-                return
-""",
+              "        async def apply() -> None:\n            if runtime is not None and self.registry.get(chat_id) is not runtime:\n                return\n",
+              "        async def apply() -> None:\n            if self.registry.get(chat_id) is not runtime:\n                return\n",
           )
           marker = "    async def run(self) -> None:\n"
           head, separator, _ = source.partition(marker)
@@ -111,7 +99,6 @@ jobs:
                 self.config.ml_model_dir,
                 self.config.youtube_api_key,
             )
-
             if self.config.bot_token:
                 self.rooms = await asyncio.to_thread(
                     RoomService,
@@ -153,7 +140,6 @@ jobs:
             else:
                 log.warning("BOT_TOKEN is absent: companion bot and room gateway are disabled")
                 await self.compass.start()
-
             waiters.append(asyncio.create_task(self.client.run_until_disconnected()))
             if server_task is not None:
                 waiters.append(server_task)
@@ -173,14 +159,8 @@ jobs:
             )
             await self._shutdown_server(server_task)
             await self._cleanup_step("command wrapper", self.command_wrapper.uninstall)
-            await self._cleanup_step(
-                "raw update handler",
-                lambda: self.client.remove_event_handler(self._on_raw_update),
-            )
-            await self._cleanup_step(
-                "chat action handler",
-                lambda: self.client.remove_event_handler(self._on_chat_action),
-            )
+            await self._cleanup_step("raw update handler", lambda: self.client.remove_event_handler(self._on_raw_update))
+            await self._cleanup_step("chat action handler", lambda: self.client.remove_event_handler(self._on_chat_action))
             for task in tuple(self._jobs):
                 task.cancel()
             await asyncio.gather(*tuple(self._jobs), return_exceptions=True)
@@ -213,10 +193,7 @@ jobs:
           def lifecycle_app() -> ParlayApp:
               app = object.__new__(ParlayApp)
               app.config = SimpleNamespace(operator_id="7")
-              app.client = Mock(
-                  remove_event_handler=Mock(),
-                  disconnect=AsyncMock(),
-              )
+              app.client = Mock(remove_event_handler=Mock(), disconnect=AsyncMock())
               app.command_wrapper = Mock(uninstall=Mock())
               app.registry = Mock(close=AsyncMock())
               app.compass = None
@@ -234,12 +211,9 @@ jobs:
           @pytest.mark.asyncio
           async def test_authorization_failure_runs_cleanup_without_masking(monkeypatch):
               app = lifecycle_app()
-              failure = RuntimeError("authorization failed")
-              monkeypatch.setattr("parlay.app.start_authorized", AsyncMock(side_effect=failure))
-
+              monkeypatch.setattr("parlay.app.start_authorized", AsyncMock(side_effect=RuntimeError("authorization failed")))
               with pytest.raises(RuntimeError, match="authorization failed"):
                   await app.run()
-
               app.registry.close.assert_awaited_once()
               app.client.disconnect.assert_awaited_once()
 
@@ -251,14 +225,9 @@ jobs:
               app.bot = Mock(stop=AsyncMock())
               app.rooms = Mock(stop=AsyncMock())
               app.activity = Mock(stop=AsyncMock())
-              monkeypatch.setattr(
-                  "parlay.app.start_authorized",
-                  AsyncMock(side_effect=ValueError("startup failed")),
-              )
-
+              monkeypatch.setattr("parlay.app.start_authorized", AsyncMock(side_effect=ValueError("startup failed")))
               with pytest.raises(ValueError, match="startup failed"):
                   await app.run()
-
               app.bot.stop.assert_awaited_once()
               app.rooms.stop.assert_awaited_once()
               app.activity.stop.assert_awaited_once()
@@ -281,11 +250,9 @@ jobs:
               app.rooms = Mock(end_group=AsyncMock())
               pending = []
               app._spawn = lambda awaitable: pending.append(awaitable)
-
               await app._queue_activity_unavailable(-100, "call_discarded")
               current = replacement
               await pending[0]
-
               app.registry.leave.assert_not_awaited()
               app.rooms.end_group.assert_not_awaited()
 
@@ -294,21 +261,17 @@ jobs:
           async def test_old_recovery_cannot_remove_new_mapping(monkeypatch):
               app = lifecycle_app()
               entered_sleep = asyncio.Event()
-
               async def blocked_sleep(_delay):
                   entered_sleep.set()
                   await asyncio.Event().wait()
-
               monkeypatch.setattr(asyncio, "sleep", blocked_sleep)
               old = asyncio.create_task(app._recover(-100))
               app._recoveries[-100] = old
               await entered_sleep.wait()
               replacement = asyncio.create_task(asyncio.Event().wait())
               app._recoveries[-100] = replacement
-
               old.cancel()
               await asyncio.gather(old, return_exceptions=True)
-
               assert app._recoveries[-100] is replacement
               replacement.cancel()
               await asyncio.gather(replacement, return_exceptions=True)
@@ -319,20 +282,15 @@ jobs:
               app = lifecycle_app()
               app._server = SimpleNamespace(should_exit=False)
               task = asyncio.create_task(asyncio.Event().wait())
-              timeout = None
-
+              observed = [None]
               async def expire(awaitable, *, timeout):
                   del awaitable
-                  nonlocal_timeout[0] = timeout
+                  observed[0] = timeout
                   raise TimeoutError
-
-              nonlocal_timeout = [timeout]
               monkeypatch.setattr(asyncio, "wait_for", expire)
-
               await app._shutdown_server(task)
-
               assert app._server.should_exit
-              assert nonlocal_timeout[0] == 15
+              assert observed[0] == 15
               assert task.cancelled()
           PY
       - name: Scoped verification
