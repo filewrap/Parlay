@@ -12,6 +12,7 @@ export type Snapshot = {
   playback: { track: Track | null; status: "idle" | "playing" | "paused"; position_seconds: number; server_time: number; queue: Track[] };
   permissions: { manage_settings: boolean; queue: boolean; control: boolean; moderate: boolean; close: boolean };
 };
+export type PendingReentry = { status: "pending" };
 export type Auth = { token: string; expires_at: number; user: { id: number; first_name: string; photo_url?: string }; start_param: string | null };
 export type ApiErrorDetail = string | { message?: string; code?: string; snapshot?: Snapshot; [key: string]: unknown };
 export type ConnectionState = "connecting" | "online" | "reconnecting" | "offline";

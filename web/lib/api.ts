@@ -1,4 +1,4 @@
-import type { ApiErrorDetail, Auth, Snapshot, Track } from "./types";
+import type { ApiErrorDetail, Auth, PendingReentry, Snapshot, Track } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, public detail: ApiErrorDetail) {
@@ -33,10 +33,12 @@ export function client(token: string) {
     ...init,
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, ...init.headers },
   }));
+  const actionRequest = (roomId: string, revision: number, action: string, payload: Record<string, unknown> = {}) => request(`/api/rooms/${encodeURIComponent(roomId)}/actions`, { method: "POST", body: JSON.stringify({ action_id: crypto.randomUUID(), expected_revision: revision, action, payload }) });
   return {
     join: (roomId: string, password?: string): Promise<Snapshot> => request(`/api/rooms/${encodeURIComponent(roomId)}/join`, { method: "POST", body: JSON.stringify({ password: password ?? "" }) }),
     snapshot: (roomId: string): Promise<Snapshot> => request(`/api/rooms/${encodeURIComponent(roomId)}`),
-    action: (roomId: string, revision: number, action: string, payload: Record<string, unknown> = {}): Promise<Snapshot> => request(`/api/rooms/${encodeURIComponent(roomId)}/actions`, { method: "POST", body: JSON.stringify({ action_id: crypto.randomUUID(), expected_revision: revision, action, payload }) }),
+    action: (roomId: string, revision: number, action: string, payload: Record<string, unknown> = {}): Promise<Snapshot> => actionRequest(roomId, revision, action, payload),
+    requestReentry: (roomId: string): Promise<PendingReentry> => actionRequest(roomId, 0, "request_reentry"),
     search: (query: string): Promise<{ tracks: Track[] }> => request(`/api/search?q=${encodeURIComponent(query)}`),
     ticket: (roomId: string): Promise<{ ticket: string }> => request("/api/ws-ticket", { method: "POST", body: JSON.stringify({ room_id: roomId }) }),
     compass: (): Promise<{ recommendations: Track[] }> => request("/api/compass"),
