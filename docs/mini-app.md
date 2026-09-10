@@ -5,7 +5,7 @@ The frontend is an independently hosted static Next.js export in `web/`. The Lin
 ## Deployment
 
 1. Set `NEXT_PUBLIC_BACKEND_URL` to the public HTTPS backend origin before `npm run build`. Do not add a trailing path.
-2. Run `npm ci`, `npm run typecheck`, `npm test`, and `npm run build` in `web/`.
+2. Run `npm ci`, `npm audit`, `npm run typecheck`, `npm test`, and `npm run build` in `web/`.
 3. Publish `web/out/` on a static host. Configure the backend to allow that exact frontend origin for HTTP and WebSocket traffic.
 4. Configure the Telegram bot Mini App URL to the static host URL. The app loads Telegram's official SDK from `https://telegram.org/js/telegram-web-app.js`.
 
@@ -13,12 +13,12 @@ The static bundle contains no bot token, Telethon session, provider credential, 
 
 ## Launch and room selection
 
-The browser sends raw `Telegram.WebApp.initData` to `POST /api/auth`. It does not use `initDataUnsafe` for identity or authorization. The room candidate returned as the server-validated `start_param` is preferred. A `?room=` URL value is only a fallback candidate and never grants admission or permissions.
+The browser sends raw `Telegram.WebApp.initData` to `POST /api/auth`. It does not use `initDataUnsafe` for identity or authorization. The room candidate returned as the server-validated nullable `start_param` is preferred. A `?room=` URL value is only a fallback candidate and never grants admission or permissions. The authenticated user identifier is the numeric `user.id` returned by the backend.
 
-The backend must expose the contract below under `NEXT_PUBLIC_BACKEND_URL`:
+The backend exposes the contract below under `NEXT_PUBLIC_BACKEND_URL`:
 
 - `POST /api/auth` with `{init_data}`.
-- `POST /api/rooms/{id}/join` with optional `{password}` and bearer authentication.
+- `POST /api/rooms/{id}/join` with `{password}` and bearer authentication.
 - `GET /api/rooms/{id}` for a current snapshot.
 - `POST /api/rooms/{id}/actions` with UUID `action_id`, `expected_revision`, `action`, and `payload`.
 - `GET /api/search?q=...`.
@@ -26,17 +26,19 @@ The backend must expose the contract below under `NEXT_PUBLIC_BACKEND_URL`:
 - `WS /api/rooms/{id}/ws?ticket=...` for snapshots, presence, and movement.
 - Compass preference, feedback, reset, and delete routes under `/api/compass`.
 
-## Client behavior and contract assumptions
+## Client behavior and backend compatibility
 
-- Snapshot member and user identifiers can be strings or numbers on the wire. The client compares their string forms.
+- Snapshot user, owner, chat, presence, moderation target, and pending re-entry identifiers are numeric on the wire.
 - Snapshot `server_time` and `expires_at` use epoch seconds.
-- A settings action sends all editable settings. `duration` is seconds from the time the backend accepts the change. The expiry shown before submit is a browser preview; the returned snapshot is authoritative.
-- An empty password is sent when settings are saved. The backend defines whether that keeps or disables password protection and must return only `password_required`, never a password or hash.
-- A `401` starts one fresh Telegram `initData` exchange. If Telegram does not provide fresh launch data, the interface asks for a relaunch.
-- A `409` fetches and shows a fresh snapshot. The client does not retry the mutation.
-- A kicked person can still send `request_reentry`. Owner approval uses `approve_reentry`.
-- Shared controls remain disabled while disconnected, recovering a connection, or after room end.
+- Backend failures use `{error:{code,message,snapshot?}}`; framework validation failures can use `detail`. A stale-revision snapshot is applied without blindly retrying the mutation.
+- Queue and force-play actions send `{query}`. The backend resolves the first supported search result and accepts only HTTPS YouTube page URLs.
+- Appearance sends optional short-string `avatar` and `outfit` fields. The client sends both current selector values.
+- Compass quiet-time controls send nullable integer hours from 0 through 23, not browser `HH:mm` strings. Reset and delete use authenticated POST routes.
+- `pending_reentry` is always present as an array and is populated only for the owner.
+- A kicked person can send `request_reentry` from the last known snapshot while normal snapshot and WebSocket access remain blocked. If the revision is stale, the backend error snapshot is shown and the action is not retried automatically. Owner approval uses a numeric `user_id`.
+- Shared controls remain disabled while disconnected, recovering a connection, or after room end. The re-entry request is the only disconnected exception.
 - Presence movement is sent at no more than 10 Hz. Remote positions are interpolated in the scene and are never treated as durable room state.
+- A settings `duration` is total lifetime in seconds from room creation. The backend does not expose `created_at`, so the client must describe any pre-submit deadline as an estimate and treat the returned `expires_at` as authoritative.
 
 ## Media and accessibility
 
