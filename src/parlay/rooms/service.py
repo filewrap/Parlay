@@ -251,7 +251,9 @@ class RoomService:
             self._active(row)
             data = self._data(row)
             member = next((m for m in data["members"] if m["user_id"] == user_id), None)
-            if not member or user_id in data["kicked"]:
+            if action == "request_reentry" and user_id in data["kicked"] and not member:
+                member = {"user_id": user_id, "role": "participant"}
+            if not member or (user_id in data["kicked"] and action != "request_reentry"):
                 raise RoomError("access_revoked", "Room access is not active", 403)
             if row["revision"] != expected_revision:
                 raise RoomError("stale_revision", "Room state changed. Refresh and retry.", 409,

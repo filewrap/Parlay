@@ -61,6 +61,7 @@ def test_two_websocket_clients_presence_and_one_time_ticket(tmp_path):
       with client.websocket_connect(f"/api/rooms/{room['id']}/ws?ticket={t2}",headers={"origin":ORIGIN}) as ws2:
         assert ws2.receive_json()["type"]=="snapshot"
         ws2.receive_json(); assert len(ws1.receive_json()["players"])==2
+        time.sleep(0.11)
         ws2.send_json({"type":"move","x":1,"z":0,"rotation":0,"seq":1})
         assert ws1.receive_json()["type"]=="presence"
     with pytest.raises(Exception):

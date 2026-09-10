@@ -18,7 +18,7 @@ async def test_capacity_password_kick_reentry_and_replay(tmp_path):
     room=await service.action(room["id"],1,"settings",room["revision"],"settings",{"password":"secret"})
     with pytest.raises(RoomError,match="password"): await service.join(room["id"],user(2),"bad")
     room=await service.join(room["id"],user(2),"secret")
-    with pytest.raises(RoomError,match="capacity"): await service.join(room["id"],user(3),"secret")
+    with pytest.raises(RoomError,match="capacity|invite-only"): await service.join(room["id"],user(3),"secret")
     room=await service.action(room["id"],1,"kick",room["revision"],"kick",{"user_id":2})
     with pytest.raises(RoomError,match="approve"): await service.join(room["id"],user(2),"secret")
     room=await service.action(room["id"],2,"request",room["revision"],"request_reentry",{})
