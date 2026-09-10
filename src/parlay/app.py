@@ -24,9 +24,11 @@ All outgoing messages are formatted through the shared presentation layer.
 Telethon usage: the client is built and authorized in `client.py`; commands are
 received through an `events.NewMessage` handler filtered to the Operator via
 `from_users` (so non-operator messages never reach the handler), and membership
-changes through `events.ChatAction`. Entities (the Operator, call chats) are
-resolved with `get_input_entity` before use so Telegram requests carry a valid
-InputPeer.
+changes through `events.ChatAction`. All chat-side Telegram actions go through
+the VoiceChatController in `vc.py`: `/join` resolves the target entity and
+verifies a live voice chat before the media layer connects, `/vcstart` and
+`/vcstop` create and discard the voice chat itself, `/vc` reports its status,
+and every in-call message is sent only after a can-send permission check.
 """
 
 from __future__ import annotations
@@ -51,6 +53,7 @@ from .membership.store import AuditLogStore
 from .membership.watcher import MembershipWatcher
 from .music.controller import MusicController
 from .session import CallSessionManager, SessionError
+from .vc import VoiceChatController, VoiceChatError
 from .voice.ai_producer import AiVoiceProducer
 from .voice.gemini import GeminiVoiceProvider, default_configuration
 from .voice.provider import ProviderError, SessionConfiguration
@@ -66,6 +69,7 @@ class ParlayApp:
         self.client = build_client(config)
         self.sessions = CallSessionManager()
         self.commands = CommandHandler(config.operator_id, config.command_prefix)
+        self.vc = VoiceChatController(self.client)
         self.bridge: RawAudioBridge | None = None
         self.arbiter: AudioOutputArbiter | None = None
         self.ai: AiVoiceProducer | None = None
@@ -82,6 +86,9 @@ class ParlayApp:
         self.commands.register("start", self._cmd_start)
         self.commands.register("stop", self._cmd_stop)
         self.commands.register("status", self._cmd_status)
+        self.commands.register("vc", self._cmd_vc)
+        self.commands.register("vcstart", self._cmd_vcstart)
+        self.commands.register("vcstop", self._cmd_vcstop)
         self.commands.register("play", self._cmd_play)
         self.commands.register("skip", self._cmd_skip)
         self.commands.register("pause", self._cmd_pause)
@@ -89,7 +96,18 @@ class ParlayApp:
         self.commands.register("queue", self._cmd_queue)
 
     async def _cmd_join(self, command: ParsedCommand) -> str:
-        target = command.args or "the current chat"
+        if not command.args:
+            return fmt.error("Usage: join <chat>")
+        # Resolve through Telethon and confirm a live voice chat before the
+        # media layer connects, so failures are precise and Telegram-authored.
+        try:
+            entity = await self.vc.resolve(command.args)
+            vc_status = await self.vc.status(entity)
+        except VoiceChatError as exc:
+            return fmt.error(str(exc))
+        if not vc_status.active:
+            return fmt.error("No active voice chat there. Start one with vcstart.")
+        target = command.args
         try:
             self.sessions.begin_join(target)
         except SessionError as exc:
@@ -97,7 +115,7 @@ class ParlayApp:
         # Bring up the raw audio bridge for this session, wiring drop detection.
         bridge = RawAudioBridge(self.client, on_disconnect=self._on_call_dropped)
         try:
-            await bridge.start(target)
+            await bridge.start(entity)
         except Exception as exc:  # roll back the session on join failure
             log.exception("failed to start raw audio bridge")
             self.sessions.end()
@@ -139,11 +157,18 @@ class ParlayApp:
         )
 
     async def _post_to_call(self, text: str) -> None:
-        """Post an in-call message to the active Call Session's chat."""
+        """Post an in-call message to the active Call Session's chat.
+
+        Sends through the VoiceChatController, which verifies Parlay may send
+        in that chat first; a denied send is logged, never raised mid-call.
+        """
         session = self.sessions.session
         if session is None:
             return
-        await self.client.send_message(session.chat, text)
+        try:
+            await self.vc.send_message(session.chat, text)
+        except VoiceChatError as exc:
+            log.warning("in-call message suppressed: %s", exc)
 
     async def _notify_operator(self, text: str) -> None:
         """Send a private message to the Operator's own account.
@@ -207,6 +232,51 @@ class ParlayApp:
     async def _cmd_status(self, command: ParsedCommand) -> str:
         icon_key = "connected" if self.sessions.active else "idle"
         return fmt.status(self.sessions.status_text(), icon_key)
+
+    def _vc_target(self, command: ParsedCommand) -> Any | None:
+        """The chat a VC command acts on: explicit arg, else the session chat."""
+        if command.args:
+            return command.args
+        session = self.sessions.session
+        return session.chat if session is not None else None
+
+    async def _cmd_vc(self, command: ParsedCommand) -> str:
+        """Report the voice-chat status of a chat (arg or the session chat)."""
+        target = self._vc_target(command)
+        if target is None:
+            return fmt.error("Usage: vc <chat> (or join a voice chat first).")
+        try:
+            vc_status = await self.vc.status(target)
+        except VoiceChatError as exc:
+            return fmt.error(str(exc))
+        if not vc_status.active:
+            return fmt.status("No active voice chat.", "idle")
+        title = f" {vc_status.title!r}" if vc_status.title else ""
+        count = vc_status.participants
+        return fmt.status(f"Voice chat{title} is live with {count} participant(s).", "connected")
+
+    async def _cmd_vcstart(self, command: ParsedCommand) -> str:
+        """Start a voice chat in the target chat (needs admin rights)."""
+        target = self._vc_target(command)
+        if target is None:
+            return fmt.error("Usage: vcstart <chat>")
+        try:
+            await self.vc.start(target)
+        except VoiceChatError as exc:
+            return fmt.error(str(exc))
+        return fmt.success("Voice chat started.")
+
+    async def _cmd_vcstop(self, command: ParsedCommand) -> str:
+        """Discard the target chat's voice chat (needs admin rights)."""
+        target = self._vc_target(command)
+        if target is None:
+            return fmt.error("Usage: vcstop <chat>")
+        try:
+            await self.vc.stop(target)
+        except VoiceChatError as exc:
+            return fmt.error(str(exc))
+        # If Parlay was in that call, the drop handler will end the session.
+        return fmt.success("Voice chat stopped.")
 
     async def _cmd_play(self, command: ParsedCommand) -> str:
         if self.music is None:
