@@ -13,82 +13,28 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg > /dev/null
-          pip install -e '.[dev]' -q
-      - name: Wire actor events and authority cache
+      - run: pip install -e '.[dev]' -q
+      - name: Apply scoped fixes
         run: |
           python - <<'PY'
           from pathlib import Path
           p=Path('src/parlay/app.py')
-          s=p.read_text().replace('import sqlite3\n', 'import sqlite3\nimport time\n',1)
-          s=s.replace('        self._server: Any = None\n', '        self._server: Any = None\n        self._people: dict[tuple[int, int], tuple[float, Any]] = {}\n        self._people_locks: dict[tuple[int, int], asyncio.Lock] = {}\n',1)
-          needle='    async def _participant(self, user_id: int, chat_id: int) -> Any:\n'
-          assert needle in s
-          s=s.replace(needle, '''    async def _participant(self, user_id: int, chat_id: int) -> Any:
-                  key = (chat_id, user_id)
-                  lock = self._people_locks.setdefault(key, asyncio.Lock())
-                  async with lock:
-                      cached = self._people.get(key)
-                      if cached and cached[0] > time.monotonic():
-                          return cached[1]
-                      person = await self._fetch_participant(user_id, chat_id)
-                      if len(self._people) >= 4096:
-                          self._people.pop(next(iter(self._people)))
-                      self._people[key] = (time.monotonic() + (15 if person is not None else 3), person)
-                      return person
-
-              async def _fetch_participant(self, user_id: int, chat_id: int) -> Any:
-          ''',1)
-          needle='    async def _on_raw_update(self, update: Any) -> None:\n'
-          assert needle in s
-          s=s.replace(needle, needle + '''        if isinstance(update, types.UpdateChannel):
-                      chat_id = get_peer_id(types.PeerChannel(update.channel_id))
-                      for key in tuple(self._people):
-                          if key[0] == chat_id:
-                              self._people.pop(key, None)
-                  if type(update).__name__ == "UpdateChannelParticipant":
-                      chat_id = get_peer_id(types.PeerChannel(update.channel_id))
-                      self._people.pop((chat_id, update.user_id), None)
-          ''',1)
-          s=s.replace('    async def _on_chat_action(self, event: Any) -> None:\n', '    async def _on_chat_action(self, event: Any) -> None:\n        for key in tuple(self._people):\n            if key[0] == event.chat_id:\n                self._people.pop(key, None)\n',1)
-          s=s.replace('authority=self._authority, member=self._member, search=self.search)', 'authority=self._authority, member=self._member, search=self.search, on_action=self._room_action_event)',1)
-          needle='    async def _room_playback(self, chat_id: int, action: str, payload: dict[str, Any]) -> dict[str, Any]:\n'
-          assert needle in s
-          s=s.replace(needle, '''    async def _room_action_event(
-                  self, room_id: str, user_id: int, action: str, track: dict[str, Any], event_id: str,
-              ) -> None:
-                  if self.compass is None:
-                      return
-                  await asyncio.to_thread(
-                      self.compass.ingest_track, track["id"], track["title"], "", track["source_url"],
-                  )
-                  await asyncio.to_thread(
-                      self.compass.record_event, str(user_id), track["id"], "play", event_id,
-                      {"room_id": room_id, "origin": action},
-                  )
-
-          ''' + needle,1)
+          s=p.read_text()
+          old='        def active_rooms() -> list[Any]:\n            with sqlite3.connect(self.rooms.db_path) as db:'
+          assert old in s
+          s=s.replace(old,'        db_path = self.rooms.db_path\n\n        def active_rooms() -> list[Any]:\n            with sqlite3.connect(db_path) as db:',1)
           p.write_text(s)
-          p=Path('src/parlay/command_wrapper.py')
-          s=p.read_text().replace('        self._lock = asyncio.Lock()', '        self._locks: dict[int, asyncio.Lock] = {}',1)
-          s=s.replace('        async with self._lock:', '        async with self._locks.setdefault(int(event.chat_id), asyncio.Lock()):',1)
+          p=Path('start.sh')
+          s=p.read_text().replace('required=(TELEGRAM_API_ID TELEGRAM_API_HASH OPERATOR_ID GEMINI_API_KEY)','required=(TELEGRAM_API_ID TELEGRAM_API_HASH OPERATOR_ID)')
           p.write_text(s)
           PY
-      - name: Format integration files
-        run: |
-          ruff check --fix src/parlay/app.py src/parlay/config.py src/parlay/search.py src/parlay/command_wrapper.py tests/test_app_commands.py tests/test_search.py tests/test_shared_config.py
-          ruff format src/parlay/app.py src/parlay/config.py src/parlay/search.py src/parlay/command_wrapper.py tests/test_app_commands.py tests/test_search.py tests/test_shared_config.py
+          ruff format src/parlay/app.py
           git config user.name 'kei'
           git config user.email 'xkailashhh@gmail.com'
-          git add src/parlay/app.py src/parlay/config.py src/parlay/search.py src/parlay/command_wrapper.py tests/test_app_commands.py tests/test_search.py tests/test_shared_config.py
-          git diff --cached --quiet || git commit -m 'fix: wire actor learning events and cache group membership checks'
+          git add src/parlay/app.py start.sh
+          git commit -m 'fix: narrow room store reference and permit music without Gemini'
           git push origin HEAD:main
-      - name: Verify Python integration
-        run: |
-          ruff check .
-          ruff format --check .
-          mypy
-          pytest -q
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy
+      - run: pytest -q
