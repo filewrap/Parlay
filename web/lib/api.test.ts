@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, parseResponse, quietHour, roomCandidate } from "./api";
+import { parseResponse, quietHour, roomCandidate } from "./api";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -18,7 +18,7 @@ describe("backend wire compatibility", () => {
   it("reads structured backend errors and stale snapshots", async () => {
     const snapshot = { id: "room", revision: 3 };
     const response = new Response(JSON.stringify({ error: { code: "stale_revision", message: "Refresh", snapshot } }), { status: 409 });
-    await expect(parseResponse(response)).rejects.toMatchObject<ApiError>({ status: 409, code: "stale_revision", snapshot });
+    await expect(parseResponse(response)).rejects.toMatchObject({ status: 409, code: "stale_revision", snapshot });
   });
   it("converts HTML time inputs to backend hour integers", () => {
     expect(quietHour("22:00")).toBe(22);
