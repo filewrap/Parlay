@@ -98,7 +98,7 @@ def test_discover_user_supplied_file_before_string(tmp_path):
 def test_ambiguous_files_require_explicit_selection(tmp_path):
     _file(tmp_path / "one.session")
     _file(tmp_path / "two.session")
-    with pytest.raises(ConfigError, match="Multiple .session files"):
+    with pytest.raises(ConfigError, match=r"Multiple \.session files"):
         build_client(_config(string_session=_valid_string_session()))
 
 
