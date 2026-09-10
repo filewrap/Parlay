@@ -4,29 +4,15 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: write
-
 jobs:
   ml-checks:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install -e '.[dev]'
-      - run: ruff format src/parlay/ml tests/test_ml.py docs/parlay-ml.md
-      - name: Commit scoped formatting
-        run: |
-          if ! git diff --quiet -- src/parlay/ml tests/test_ml.py docs/parlay-ml.md; then
-            git config user.name 'Alex C11'
-            git config user.email 'alex.c992954@gmail.com'
-            git add src/parlay/ml tests/test_ml.py docs/parlay-ml.md
-            git commit -m 'style(ml): format concurrency fixes'
-            git push
-          fi
+      - run: pip install -q -e '.[dev]'
       - run: ruff check src/parlay/ml tests/test_ml.py
       - run: ruff format --check src/parlay/ml tests/test_ml.py docs/parlay-ml.md
       - run: mypy src/parlay/ml
