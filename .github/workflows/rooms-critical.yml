@@ -1,4 +1,4 @@
-name: Rooms critical verification
+name: Rooms focused auth verification
 on: {workflow_dispatch: {}}
 permissions: {contents: write}
 jobs:
@@ -6,48 +6,134 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: {token: '${{ secrets.GITHUB_TOKEN }}'}
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-python@v5
-        with: {python-version: '3.11'}
+        with:
+          python-version: '3.11'
       - run: pip -q install -e . 'fastapi>=0.115,<1' 'uvicorn>=0.30,<1' httpx websockets pytest pytest-asyncio ruff mypy
-      - name: Patch and commit
+      - name: Apply focused fixes
         run: |
           python - <<'PY'
           from pathlib import Path
-          p=Path('src/parlay/rooms/gateway.py'); s=p.read_text()
-          s=s.replace('    values.pop("signature", None)\n','')
-          start=s.index('        if inspect.iscoroutinefunction(method):',s.index('    async def compass_call'))
-          end=s.index('\n\n    @app.get("/api/compass")',start)
-          s=s[:start]+'''        try:\n            if inspect.iscoroutinefunction(method):\n                return await method(*args)\n            return await asyncio.to_thread(method, *args)\n        except ValueError as error:\n            raise HTTPException(400, str(error)) from error'''+s[end:]
-          p.write_text(s)
-          p=Path('src/parlay/rooms/service.py'); s=p.read_text().replace('import uuid\n','import uuid\nfrom urllib.parse import urlsplit\n',1)
-          a=s.index('            if row["revision"] != expected_revision:',s.index('    async def action(')); b=s.index('\n            await asyncio.to_thread(',a)
-          block=s[a:b]
-          block=block.replace('            if row["revision"] != expected_revision:','            reentry_request = action == "request_reentry" and user_id in data["kicked"]\n            if not reentry_request and row["revision"] != expected_revision:',1)
-          block=block.replace('            output = self._snapshot(new_row, user_id)','''            if reentry_request:\n                output = {"status": "pending"}\n                publish_output = self._snapshot(new_row, row["owner_id"])\n            else:\n                output = self._snapshot(new_row, user_id)\n                publish_output = output''',1)
-          s=s[:a]+block+s[b:]
-          pub=s.index('        self._publish(room_id, output)',b); s=s[:pub]+s[pub:].replace('        self._publish(room_id, output)','        self._publish(room_id, publish_output)',1)
-          s=s.replace('                playback_call = (row["chat_id"], action, {"track": resolved})','''                runtime_action = "play" if action == "queue_add" else "force_play"\n                runtime_payload = (\n                    {"queue": [resolved["source_url"]]}\n                    if runtime_action == "play"\n                    else {"request": resolved["source_url"]}\n                )\n                playback_call = (row["chat_id"], runtime_action, runtime_payload)''',1)
-          a=s.index('        url = track.get("source_url", "")',s.index('    def _clean_track')); b=s.index('\n        output = ',a)
-          s=s[:a]+'''        url = track.get("source_url", "")\n        parsed = urlsplit(url) if isinstance(url, str) else None\n        if (\n            parsed is None\n            or parsed.scheme != "https"\n            or parsed.hostname not in {"www.youtube.com", "youtube.com", "youtu.be"}\n            or parsed.username is not None\n            or parsed.password is not None\n            or parsed.port not in {None, 443}\n        ):\n            raise RoomError("unsupported_source", "Only HTTPS YouTube page URLs are supported")'''+s[b:]
-          p.write_text(s)
-          p=Path('tests/test_rooms_gateway.py'); s=p.read_text()
-          s=s.replace('    assert validate_init_data(signed(), TOKEN)["user"]["id"] == 1\n','''    assert validate_init_data(signed(), TOKEN)["user"]["id"] == 1\n    modern = signed(extra={"signature": "modern-ed25519-signature"})\n    assert validate_init_data(modern, TOKEN)["user"]["id"] == 1\n    with pytest.raises(ValueError, match="signature"):\n        validate_init_data(modern.replace("modern-ed25519-signature", "tampered"), TOKEN)\n''',1)
-          s=s.replace('    duplicate = signed() + "&auth_date=1"','''    with pytest.raises(ValueError, match="duplicate"):\n        validate_init_data(modern + "&signature=other", TOKEN)\n    with pytest.raises(ValueError, match="Telegram user"):\n        validate_init_data(signed(extra={"user": "[]"}), TOKEN)\n    duplicate = signed() + "&auth_date=1"''',1)
-          s=s.replace('"expected_revision": kicked.json()["revision"]','"expected_revision": 0',1).replace('assert request.json()["pending_reentry"] == []','assert request.json() == {"status": "pending"}',1)
-          p.write_text(s)
-          p=Path('tests/test_rooms_service.py'); s=p.read_text()
-          s=s.replace('''    room = await service.action(room["id"], 2, "request", room["revision"], "request_reentry", {})\n    assert notices and room["pending_reentry"] == []\n    owner = await service.snapshot(room["id"], 1)''','''    room_id = room["id"]\n    room = await service.action(room_id, 2, "request", 0, "request_reentry", {})\n    assert notices and room == {"status": "pending"}\n    with pytest.raises(RoomError, match="access"):\n        await service.snapshot(room_id, 2)\n    owner = await service.snapshot(room_id, 1)''',1)
-          s=s.replace('room["id"], 1, "approve"','room_id, 1, "approve"',1).replace('service.join(room["id"], user(2), "secret")','service.join(room_id, user(2), "secret")',1).replace('service.snapshot(room["id"], 1)','service.snapshot(room_id, 1)',1)
-          p.write_text(s)
+
+          gateway = Path('src/parlay/rooms/gateway.py')
+          text = gateway.read_text()
+          old = '    values.pop("signature", None)\n'
+          assert text.count(old) == 1, text.count(old)
+          gateway.write_text(text.replace(old, '', 1))
+
+          service = Path('src/parlay/rooms/service.py')
+          text = service.read_text()
+          old = '''            member = next((m for m in data["members"] if m["user_id"] == user_id), None)
+            if action == "request_reentry" and user_id in data["kicked"] and not member:
+                member = {"user_id": user_id, "role": "participant"}
+            if not member or (user_id in data["kicked"] and action != "request_reentry"):
+                raise RoomError("access_revoked", "Room access is not active", 403)
+            if row["revision"] != expected_revision:
+'''
+          new = '''            member = next((m for m in data["members"] if m["user_id"] == user_id), None)
+            reentry_request = (
+                action == "request_reentry" and user_id in data["kicked"] and member is None
+            )
+            if reentry_request:
+                member = {"user_id": user_id, "role": "participant"}
+            if not member or (user_id in data["kicked"] and not reentry_request):
+                raise RoomError("access_revoked", "Room access is not active", 403)
+            if not reentry_request and row["revision"] != expected_revision:
+'''
+          assert text.count(old) == 1, text.count(old)
+          text = text.replace(old, new, 1)
+          old = '''            new_row = self._replace(row, revision, data)
+            output = self._snapshot(new_row, user_id)
+            await asyncio.to_thread(
+'''
+          new = '''            new_row = self._replace(row, revision, data)
+            if reentry_request:
+                output = {"status": "pending"}
+                publication = self._snapshot(new_row, row["owner_id"])
+            else:
+                output = self._snapshot(new_row, user_id)
+                publication = output
+            await asyncio.to_thread(
+'''
+          assert text.count(old) == 1, text.count(old)
+          text = text.replace(old, new, 1)
+          old = '        self._publish(room_id, output)\n        return output\n'
+          new = '        self._publish(room_id, publication)\n        return output\n'
+          assert text.count(old) == 1, text.count(old)
+          service.write_text(text.replace(old, new, 1))
+
+          tests = Path('tests/test_rooms_gateway.py')
+          text = tests.read_text()
+          old = '    assert validate_init_data(signed(), TOKEN)["user"]["id"] == 1\n'
+          new = '''    assert validate_init_data(signed(), TOKEN)["user"]["id"] == 1
+    modern = signed(extra={"signature": "modern-ed25519-signature"})
+    assert validate_init_data(modern, TOKEN)["user"]["id"] == 1
+    with pytest.raises(ValueError, match="signature"):
+        validate_init_data(modern.replace("modern-ed25519-signature", "tampered"), TOKEN)
+    with pytest.raises(ValueError, match="duplicate"):
+        validate_init_data(modern + "&signature=other", TOKEN)
+    with pytest.raises(ValueError, match="Telegram user"):
+        validate_init_data(signed(extra={"user": "[]"}), TOKEN)
+'''
+          assert text.count(old) == 1, text.count(old)
+          text = text.replace(old, new, 1)
+          old = '''                "expected_revision": kicked.json()["revision"],
+                "action": "request_reentry",
+'''
+          new = '''                "expected_revision": 0,
+                "action": "request_reentry",
+'''
+          assert text.count(old) == 1, text.count(old)
+          text = text.replace(old, new, 1)
+          old = '        assert request.json()["pending_reentry"] == []\n'
+          new = '''        assert request.json() == {"status": "pending"}
+        denied = await client.get(f"/api/rooms/{room['id']}", headers=second)
+        assert denied.status_code == 403
+        denied_ticket = await client.post(
+            "/api/ws-ticket", json={"room_id": room["id"]}, headers=second
+        )
+        assert denied_ticket.status_code == 403
+'''
+          assert text.count(old) == 1, text.count(old)
+          tests.write_text(text.replace(old, new, 1))
+
+          tests = Path('tests/test_rooms_service.py')
+          text = tests.read_text()
+          old = '''    room = await service.action(room["id"], 2, "request", room["revision"], "request_reentry", {})
+    assert notices and room["pending_reentry"] == []
+    owner = await service.snapshot(room["id"], 1)
+'''
+          new = '''    room_id = room["id"]
+    room = await service.action(room_id, 2, "request", 0, "request_reentry", {})
+    assert notices and room == {"status": "pending"}
+    assert await service.action(room_id, 2, "request", 0, "request_reentry", {}) == room
+    with pytest.raises(RoomError, match="access"):
+        await service.snapshot(room_id, 2)
+    owner = await service.snapshot(room_id, 1)
+'''
+          assert text.count(old) == 1, text.count(old)
+          text = text.replace(old, new, 1)
+          text = text.replace('room["id"], 1, "approve", owner["revision"]', 'room_id, 1, "approve", owner["revision"]', 1)
+          text = text.replace('service.join(room["id"], user(2), "secret")', 'service.join(room_id, user(2), "secret")', 1)
+          tests.write_text(text)
           PY
-          ruff check --fix src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
-          ruff format src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
-          git config user.name 'Alex C11'; git config user.email 'alex.c992954@gmail.com'
-          git add src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
-          git commit -m 'fix(rooms): harden authentication and reentry'
-          git pull --rebase origin main; git push origin HEAD:main
-      - run: ruff format --check src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
-      - run: ruff check src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
-      - run: mypy src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
-      - run: pytest -q tests/test_rooms_service.py tests/test_rooms_gateway.py
+          ruff check --fix src/parlay/rooms/gateway.py src/parlay/rooms/service.py tests/test_rooms_gateway.py tests/test_rooms_service.py
+          ruff format src/parlay/rooms/gateway.py src/parlay/rooms/service.py tests/test_rooms_gateway.py tests/test_rooms_service.py
+      - name: Verify focused auth test
+        run: pytest -q tests/test_rooms_gateway.py::test_official_init_data_signature_and_time_checks
+      - name: Verify rooms suite
+        run: pytest -q tests/test_rooms_service.py tests/test_rooms_gateway.py
+      - run: ruff format --check src/parlay/rooms/gateway.py src/parlay/rooms/service.py tests/test_rooms_gateway.py tests/test_rooms_service.py
+      - run: ruff check src/parlay/rooms/gateway.py src/parlay/rooms/service.py tests/test_rooms_gateway.py tests/test_rooms_service.py
+      - run: mypy src/parlay/rooms/gateway.py src/parlay/rooms/service.py tests/test_rooms_gateway.py tests/test_rooms_service.py
+      - name: Commit fixes and remove temporary workflow
+        run: |
+          git config user.name 'Alex C11'
+          git config user.email 'alex.c992954@gmail.com'
+          git rm .github/workflows/rooms-critical.yml
+          git add src/parlay/rooms/gateway.py src/parlay/rooms/service.py tests/test_rooms_gateway.py tests/test_rooms_service.py
+          git commit -m 'fix(rooms): harden Telegram auth and excluded reentry'
+          git pull --rebase origin main
+          git push origin HEAD:main
