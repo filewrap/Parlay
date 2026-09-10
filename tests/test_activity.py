@@ -325,3 +325,104 @@ async def test_public_methods_require_start_and_stop_is_idempotent(tmp_path) -> 
     await tracker.start()
     await tracker.stop()
     await tracker.stop()
+
+
+async def test_concurrent_transport_and_participant_save_merge_fields(tmp_path) -> None:
+    client = FakeClient()
+    chat_id = setup_chat(client, 101, 11)
+    _seen, callback = callback_collector()
+    tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
+    await tracker.start()
+    try:
+        previous = await tracker._get(chat_id)
+        await asyncio.gather(
+            tracker.set_transport(chat_id, True),
+            tracker._apply_self(chat_id, participant(), 2, previous),
+        )
+        state = await tracker._get(chat_id)
+        assert state is not None
+        assert state.transport is True
+        assert state.membership == "joined"
+        assert state.version == 2
+    finally:
+        await tracker.stop()
+
+
+async def test_send_only_restriction_is_not_membership_removal(tmp_path) -> None:
+    client = FakeClient()
+    _seen, callback = callback_collector()
+    tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
+    await tracker.start()
+    chat_id = get_peer_id(types.PeerChannel(101))
+    scheduled: list[int] = []
+    tracker._schedule_reconcile = scheduled.append
+    try:
+        await tracker._save(chat_id, call_state="active", membership="joined", transport=True)
+        restricted = types.ChannelParticipantBanned(
+            peer=types.PeerUser(7),
+            kicked_by=1,
+            date=None,
+            banned_rights=types.ChatBannedRights(until_date=None, send_messages=True),
+        )
+        update = SimpleNamespace(channel_id=101, user_id=7, new_participant=restricted)
+        await tracker._handle_channel_participant(update)
+        state = await tracker._get(chat_id)
+        assert state is not None
+        assert state.membership == "joined"
+        assert state.transport is True
+        assert scheduled == [chat_id]
+    finally:
+        await tracker.stop()
+
+
+async def test_stale_discarded_call_does_not_overwrite_new_call(tmp_path) -> None:
+    client = FakeClient()
+    chat_id = setup_chat(client, 101, 11)
+    client.participants[11] = [participant()]
+    seen, callback = callback_collector()
+    tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
+    await tracker.start()
+    try:
+        await tracker._save(
+            chat_id,
+            call_id=22,
+            access_hash=220,
+            call_state="active",
+            membership="joined",
+            transport=True,
+            version=5,
+        )
+        stale = types.UpdateGroupCall(
+            call=types.GroupCallDiscarded(id=11, access_hash=110, duration=8),
+            peer=types.PeerChat(chat_id=101),
+        )
+        await tracker.handle_update(stale)
+        state = await tracker._get(chat_id)
+        assert state is not None
+        assert state.call_id == 22
+        assert state.call_state == "active"
+        assert state.membership == "joined"
+        assert state.transport is True
+        assert seen == []
+    finally:
+        await tracker.stop()
+
+
+async def test_stale_group_call_version_does_not_regress_state(tmp_path) -> None:
+    client = FakeClient()
+    chat_id = setup_chat(client, 101, 11)
+    _seen, callback = callback_collector()
+    tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
+    await tracker.start()
+    try:
+        await tracker._save(chat_id, version=5)
+        stale = SimpleNamespace(
+            call=SimpleNamespace(id=11, access_hash=110, version=4),
+            peer=types.PeerChat(chat_id=101),
+        )
+        await tracker._handle_group_call(stale)
+        state = await tracker._get(chat_id)
+        assert state is not None
+        assert state.version == 5
+    finally:
+        await tracker.stop()

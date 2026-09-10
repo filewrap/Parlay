@@ -257,43 +257,55 @@ class ActivityTracker:
         version: Any = _UNSET,
         unavailable_reason: Any = _UNSET,
     ) -> None:
-        previous = await self._get(chat_id)
+        def operation(connection: sqlite3.Connection) -> None:
+            row = connection.execute(
+                """
+                SELECT chat_id, call_id, access_hash, call_state, membership,
+                       transport, version, unavailable_reason
+                FROM activity WHERE account_id=? AND chat_id=?
+                """,
+                (self._account_id, chat_id),
+            ).fetchone()
+            previous = self._row(row)
 
-        def value(field: str, supplied: Any, default: Any) -> Any:
-            if supplied is not _UNSET:
-                return supplied
-            return getattr(previous, field) if previous is not None else default
+            def value(field: str, supplied: Any, default: Any) -> Any:
+                if supplied is not _UNSET:
+                    return supplied
+                return getattr(previous, field) if previous is not None else default
 
-        values = (
-            self._account_id,
-            chat_id,
-            value("call_id", call_id, None),
-            value("access_hash", access_hash, None),
-            value("call_state", call_state, "unknown"),
-            value("membership", membership, "unknown"),
-            int(bool(value("transport", transport, False))),
-            value("version", version, None),
-            value("unavailable_reason", unavailable_reason, None),
-            int(time.time()),
-        )
-        await self._execute(
-            """
-            INSERT INTO activity (
-                account_id, chat_id, call_id, access_hash, call_state, membership,
-                transport, version, unavailable_reason, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(account_id, chat_id) DO UPDATE SET
-                call_id=excluded.call_id,
-                access_hash=excluded.access_hash,
-                call_state=excluded.call_state,
-                membership=excluded.membership,
-                transport=excluded.transport,
-                version=excluded.version,
-                unavailable_reason=excluded.unavailable_reason,
-                updated_at=excluded.updated_at
-            """,
-            values,
-        )
+            values = (
+                self._account_id,
+                chat_id,
+                value("call_id", call_id, None),
+                value("access_hash", access_hash, None),
+                value("call_state", call_state, "unknown"),
+                value("membership", membership, "unknown"),
+                int(bool(value("transport", transport, False))),
+                value("version", version, None),
+                value("unavailable_reason", unavailable_reason, None),
+                int(time.time()),
+            )
+            with connection:
+                connection.execute(
+                    """
+                    INSERT INTO activity (
+                        account_id, chat_id, call_id, access_hash, call_state, membership,
+                        transport, version, unavailable_reason, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(account_id, chat_id) DO UPDATE SET
+                        call_id=excluded.call_id,
+                        access_hash=excluded.access_hash,
+                        call_state=excluded.call_state,
+                        membership=excluded.membership,
+                        transport=excluded.transport,
+                        version=excluded.version,
+                        unavailable_reason=excluded.unavailable_reason,
+                        updated_at=excluded.updated_at
+                    """,
+                    values,
+                )
+
+        await self._db(operation)
 
     @staticmethod
     def _row(row: tuple[Any, ...] | None) -> _Activity | None:
@@ -360,6 +372,8 @@ class ActivityTracker:
             return
         previous = await self._get(chat_id)
         if isinstance(update.call, types.GroupCallDiscarded):
+            if previous is not None and previous.call_id not in (None, call_id):
+                return
             await self._save(
                 chat_id,
                 call_id=call_id,
@@ -371,12 +385,25 @@ class ActivityTracker:
             )
             await self._notify_once(chat_id, "call_discarded", previous)
         else:
+            update_version = getattr(update.call, "version", None)
+            if (
+                previous is not None
+                and previous.call_id == call_id
+                and previous.version is not None
+                and update_version is not None
+                and update_version < previous.version
+            ):
+                return
+            call_changed = previous is not None and previous.call_id not in (None, call_id)
             await self._save(
                 chat_id,
                 call_id=call_id,
                 access_hash=getattr(update.call, "access_hash", None),
                 call_state="active",
-                version=getattr(update.call, "version", None),
+                membership="unknown" if call_changed else _UNSET,
+                transport=False if call_changed else _UNSET,
+                unavailable_reason=None if call_changed else _UNSET,
+                version=update_version,
             )
 
     async def _handle_participants(self, update: types.UpdateGroupCallParticipants) -> None:
@@ -384,10 +411,22 @@ class ActivityTracker:
         if state is None:
             self._schedule_discovery()
             return
-        if state.version is not None and update.version != state.version + 1:
+        own = next((item for item in update.participants if self._is_self(item)), None)
+        if own is not None and not bool(getattr(own, "versioned", False)):
+            await self._apply_self(state.chat_id, own, update.version, state)
+            return
+        if state.version is None:
             self._schedule_reconcile(state.chat_id)
             return
-        own = next((item for item in update.participants if self._is_self(item)), None)
+        if update.version < state.version:
+            return
+        if update.version == state.version:
+            if own is not None:
+                self._schedule_reconcile(state.chat_id)
+            return
+        if update.version > state.version + 1:
+            self._schedule_reconcile(state.chat_id)
+            return
         if own is None:
             await self._save(state.chat_id, version=update.version)
             return
@@ -464,7 +503,15 @@ class ActivityTracker:
             return
         chat_id = get_peer_id(types.PeerChannel(int(update.channel_id)))
         participant = getattr(update, "new_participant", None)
-        removed = participant is None or isinstance(participant, types.ChannelParticipantBanned)
+        banned_and_removed = isinstance(participant, types.ChannelParticipantBanned) and (
+            bool(getattr(participant, "left", False))
+            or bool(getattr(participant.banned_rights, "view_messages", False))
+        )
+        removed = (
+            participant is None
+            or isinstance(participant, types.ChannelParticipantLeft)
+            or banned_and_removed
+        )
         if not removed:
             self._schedule_reconcile(chat_id)
             return
