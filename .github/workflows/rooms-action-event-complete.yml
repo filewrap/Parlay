@@ -1,0 +1,49 @@
+name: Rooms action event complete verification
+
+on:
+  push:
+    paths:
+      - .github/workflows/rooms-action-event-complete.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Apply bounded changes
+        run: |
+          sed 's/def _clean_track(self, track: Any)/def _clean_track(track: dict)/' .github/workflows/rooms-action-event-final.yml > /tmp/final.yml
+          python - <<'PY'
+          from pathlib import Path
+          workflow = Path('/tmp/final.yml').read_text()
+          script = workflow.split("cat > /tmp/patch.py <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
+          script = '\n'.join(line[10:] if line.startswith('          ') else line for line in script.splitlines())
+          Path('/tmp/patch.py').write_text(script)
+          PY
+          python /tmp/patch.py
+      - name: Install and verify
+        run: |
+          python -m pip install --upgrade pip -q
+          pip install -e '.[dev]' -q
+          ruff check --fix src/parlay/rooms/service.py tests/test_rooms_service.py
+          ruff format src/parlay/rooms/service.py tests/test_rooms_service.py
+          ruff check src/parlay/rooms/service.py tests/test_rooms_service.py
+          ruff format --check src/parlay/rooms/service.py tests/test_rooms_service.py
+          pytest -q tests/test_rooms_service.py
+          mypy src/parlay/rooms/service.py
+      - name: Commit scoped files and clean temporary workflows
+        run: |
+          git config user.name "Alex C11"
+          git config user.email "alex.c992954@gmail.com"
+          git rm .github/workflows/rooms-action-event.yml .github/workflows/rooms-action-event-repair.yml .github/workflows/rooms-action-event-final.yml .github/workflows/rooms-action-event-complete.yml
+          git add src/parlay/rooms/service.py tests/test_rooms_service.py
+          git commit -m "feat(rooms): emit idempotent playback action events"
+          git push
