@@ -1,7 +1,9 @@
 name: Rooms focused auth verification
 
-on:
-  workflow_dispatch:
+'on':
+  push:
+    paths:
+      - '.github/workflows/rooms-critical.yml'
 
 permissions:
   contents: write
