@@ -183,9 +183,7 @@ async def test_two_actor_gateway_room_runtime_and_compass_integration(
         joined = await client.post(f"/api/rooms/{room['id']}/join", json={}, headers=current_owner)
         assert joined.status_code == 200
         admitted = joined.json()
-        current_view = (
-            await client.get(f"/api/rooms/{room['id']}", headers=current_owner)
-        ).json()
+        current_view = (await client.get(f"/api/rooms/{room['id']}", headers=current_owner)).json()
         assert admitted["id"] == room["id"]
         assert current_view["permissions"]["control"] is True
 
