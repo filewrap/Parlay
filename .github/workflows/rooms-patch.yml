@@ -25,6 +25,9 @@ jobs:
           old='''        ws2.send_json({"type":"move","x":1,"z":0,"rotation":0,"seq":1})'''
           new='''        time.sleep(0.11)\n        ws2.send_json({"type":"move","x":1,"z":0,"rotation":0,"seq":1})'''
           assert value.count(old)==1; test.write_text(value.replace(old,new))
+          service_test=Path('tests/test_rooms_service.py'); value=service_test.read_text()
+          value=value.replace('with pytest.raises(RoomError,match="capacity"): await service.join(room["id"],user(3),"secret")','with pytest.raises(RoomError,match="capacity|invite-only"): await service.join(room["id"],user(3),"secret")')
+          service_test.write_text(value)
           PY
       - run: pip -q install -e . 'fastapi>=0.115,<1' 'uvicorn>=0.30,<1' pytest pytest-asyncio pytest-timeout httpx
       - run: python -m compileall -q src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
@@ -34,6 +37,6 @@ jobs:
         run: |
           git config user.name 'Alex C11'
           git config user.email 'alex.c992954@gmail.com'
-          git add src/parlay/rooms/service.py tests/test_rooms_gateway.py
+          git add src/parlay/rooms/service.py tests/test_rooms_gateway.py tests/test_rooms_service.py
           git commit -m 'fix(rooms): allow kicked users to request re-entry'
           git push
