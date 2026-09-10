@@ -89,7 +89,15 @@ class RawAudioBridge:
             raise RuntimeError("bridge already active")
         self._loop = asyncio.get_event_loop()
         self._capture.start(self._loop)
-        await self._adapter.start(chat)
+        try:
+            await self._adapter.start(chat)
+        except BaseException:
+            try:
+                await self._adapter.stop()
+            finally:
+                await self._capture.stop()
+                self._playback.clear()
+            raise
         self._active = True
         log.info("raw audio bridge active")
 

@@ -1,5 +1,6 @@
 """Application command regression tests with native audio replaced at its boundary."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -113,3 +114,45 @@ async def test_activity_cleanup_is_chat_scoped_and_duplicate_safe(app):
     assert not app.sessions.active
     app._notify_operator.assert_awaited_once()
     app.activity.set_transport.assert_awaited_with(chat_id, False)
+
+
+@pytest.mark.asyncio
+async def test_raw_callback_returns_while_media_lock_held(app):
+    app.vc.resolve = AsyncMock(return_value=channel())
+    await app._cmd_join(ParsedCommand("join", "@music", "7"))
+    app._notify_operator = AsyncMock()
+    async with app._media_lock:
+        await asyncio.wait_for(
+            app._queue_activity_unavailable(app._media_chat_id, "call_discarded"), 0.2
+        )
+        await asyncio.sleep(0)
+        assert app.sessions.active
+    await asyncio.gather(*tuple(app._activity_jobs))
+    assert not app.sessions.active
+
+
+@pytest.mark.asyncio
+async def test_old_queued_callback_cannot_close_rejoined_session(app):
+    app.vc.resolve = AsyncMock(return_value=channel())
+    await app._cmd_join(ParsedCommand("join", "@music", "7"))
+    chat_id = app._media_chat_id
+    async with app._media_lock:
+        await app._queue_activity_unavailable(chat_id, "call_discarded")
+        await asyncio.sleep(0)
+        app.sessions.end()
+        app.sessions.begin_join(str(chat_id))
+        app.sessions.mark_connected()
+    await asyncio.gather(*tuple(app._activity_jobs))
+    assert app.sessions.active
+
+
+@pytest.mark.asyncio
+async def test_cancelled_join_rolls_back(app, monkeypatch):
+    app.vc.resolve = AsyncMock(return_value=channel())
+    bridge = Mock(start=AsyncMock(side_effect=asyncio.CancelledError()), stop=AsyncMock())
+    monkeypatch.setattr("parlay.app.RawAudioBridge", lambda *a, **kw: bridge)
+    with pytest.raises(asyncio.CancelledError):
+        await app._cmd_join(ParsedCommand("join", "@music", "7"))
+    assert not app.sessions.active
+    assert app._media_chat_id is None
+    bridge.stop.assert_awaited()

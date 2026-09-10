@@ -119,6 +119,10 @@ class ParlayApp:
                 self.sessions.mark_connected()
                 if self.activity is not None and self._activity_ready:
                     await self.activity.set_transport(chat_id, True)
+            except asyncio.CancelledError:
+                await self._close_call()
+                await bridge.stop()
+                raise
             except Exception:
                 log.exception("Could not connect media transport for chat %s", chat_id)
                 await self._close_call()
@@ -358,7 +362,7 @@ class ParlayApp:
             if self.sessions.session is not session:
                 return
             try:
-                await self._on_activity_unavailable(chat_id, reason)
+                await self._on_activity_unavailable(chat_id, reason, expected_session=session)
             except Exception:
                 log.exception("Activity cleanup failed for chat %s", chat_id)
 
@@ -366,11 +370,19 @@ class ParlayApp:
         self._activity_jobs.add(task)
         task.add_done_callback(self._activity_jobs.discard)
 
-    async def _on_activity_unavailable(self, chat_id: int, reason: str) -> None:
+    async def _on_activity_unavailable(
+        self,
+        chat_id: int,
+        reason: str,
+        *,
+        expected_session: Any = None,
+    ) -> None:
         if self._closing_call or self._shutting_down or chat_id != self._media_chat_id:
             return
         async with self._media_lock:
             if chat_id != self._media_chat_id:
+                return
+            if expected_session is not None and self.sessions.session is not expected_session:
                 return
             if reason == "media_revoked":
                 # Admin mute retains the receive connection.

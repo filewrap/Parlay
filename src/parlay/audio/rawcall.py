@@ -125,6 +125,7 @@ class RawCallAdapter:
             _started.add(key)
         self._chat_id = await app.resolve_chat_id(chat)
         app.add_handler(self._handle_update)
+        self._app = app  # Keep cleanup possible if play/record fails or is cancelled.
         await app.play(
             self._chat_id,
             api.MediaStream(api.ExternalMedia.AUDIO, audio_parameters=api.AudioQuality.HIGH),
