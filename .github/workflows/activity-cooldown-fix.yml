@@ -1,0 +1,55 @@
+name: Activity discovery cooldown helper
+
+'on':
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add discovery cooldown
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/parlay/activity.py')
+          s = p.read_text()
+          s = s.replace(
+              '        self._discovery_task: asyncio.Task[None] | None = None\n',
+              '        self._discovery_task: asyncio.Task[None] | None = None\n        self._last_discovery_at = 0.0\n',
+              1,
+          )
+          old = '''    def _schedule_discovery(self) -> None:
+        if self._stopping or not self._started:
+            return
+        if self._discovery_task is not None and not self._discovery_task.done():
+            return
+        self._discovery_task = asyncio.create_task(
+'''
+          new = '''    def _schedule_discovery(self) -> None:
+        if self._stopping or not self._started:
+            return
+        now = time.monotonic()
+        if now - self._last_discovery_at < 0.1:
+            return
+        if self._discovery_task is not None and not self._discovery_task.done():
+            return
+        self._last_discovery_at = now
+        self._discovery_task = asyncio.create_task(
+'''
+          assert old in s
+          p.write_text(s.replace(old, new, 1))
+          PY
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install 'ruff>=0.6' -q
+      - run: ruff format src/parlay/activity.py tests/test_activity.py
+      - run: ruff check src/parlay/activity.py tests/test_activity.py
+      - name: Commit owned file
+        run: git config user.name 'Alex C11' && git config user.email 'alex.c992954@gmail.com' && git add src/parlay/activity.py tests/test_activity.py && git commit -m 'Bound repeated activity discovery' && git push
