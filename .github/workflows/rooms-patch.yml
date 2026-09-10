@@ -39,4 +39,5 @@ jobs:
           git config user.email 'alex.c992954@gmail.com'
           git add src/parlay/rooms/service.py tests/test_rooms_gateway.py tests/test_rooms_service.py
           git commit -m 'fix(rooms): allow kicked users to request re-entry'
-          git push
+          git pull --rebase origin main
+          git push origin HEAD:main
