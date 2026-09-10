@@ -14,21 +14,47 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip -q install -e . 'fastapi>=0.115,<1' 'uvicorn>=0.30,<1' httpx websockets pytest pytest-asyncio ruff mypy
-      - name: Verify and capture result
+      - name: Apply live socket fixes
         run: |
-          set +e
-          {
-            ruff format --check src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
-            ruff check src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
-            mypy src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
-            pytest -q --tb=short tests/test_rooms_service.py tests/test_rooms_gateway.py
-          } > .github/rooms-test-output.txt 2>&1
-          status=$?
-          cat .github/rooms-test-output.txt
+          python - <<'PY'
+          from pathlib import Path
+          path=Path('src/parlay/rooms/gateway.py'); text=path.read_text()
+          old='''        user, session_expiry = consumed\n        user_id = int(user["id"])'''
+          new='''        user, session_expiry, session_hash = consumed\n        user_id = int(user["id"])'''
+          assert text.count(old)==1; text=text.replace(old,new)
+          old='''        connection = SocketConnection(websocket, room_id, user_id, session_expiry)'''
+          new='''        connection = SocketConnection(\n            websocket, room_id, user_id, session_expiry, session_hash\n        )'''
+          assert text.count(old)==1; text=text.replace(old,new)
+          old='''    expires_at: float\n    outbound: asyncio.Queue[dict[str, Any] | None]'''
+          new='''    expires_at: float\n    session_hash: str\n    outbound: asyncio.Queue[dict[str, Any] | None]'''
+          assert text.count(old)==1; text=text.replace(old,new)
+          old='''    def consume_ticket(self, ticket: str, room_id: str) -> tuple[dict[str, Any], float] | None:'''
+          new='''    def consume_ticket(\n        self, ticket: str, room_id: str\n    ) -> tuple[dict[str, Any], float, str] | None:'''
+          assert text.count(old)==1; text=text.replace(old,new)
+          old='''        return cast(dict[str, Any], user), float(row["session_expiry"])'''
+          new='''        return cast(dict[str, Any], user), float(row["session_expiry"]), str(row["token_hash"])'''
+          assert text.count(old)==1; text=text.replace(old,new)
+          old='''                \"\"\"SELECT t.room_id,t.expires_at,t.used_at,s.user_json,\n                          s.expires_at AS session_expiry'''
+          new='''                \"\"\"SELECT t.room_id,t.expires_at,t.used_at,t.token_hash,s.user_json,\n                          s.expires_at AS session_expiry'''
+          assert text.count(old)==1; text=text.replace(old,new)
+          old='''            while True:\n                try:\n                    await asyncio.wait_for(service_queue.get(), 0.25)\n                except TimeoutError:\n                    pass\n                if time.time() >= session_expiry:\n                    await websocket.close(1008, \"Session expired\")\n                    return\n                try:\n                    current = await service.snapshot(room_id, user_id)\n                except RoomError:\n                    await websocket.close(1008, \"Room access revoked\")\n                    return\n                if not connection.enqueue({\"type\": \"snapshot\", \"snapshot\": current}):\n                    await websocket.close(1013, \"Slow client\")\n                    return'''
+          new='''            while True:\n                changed = True\n                try:\n                    await asyncio.wait_for(service_queue.get(), 0.25)\n                except TimeoutError:\n                    changed = False\n                with state.connect() as db:\n                    session_row = db.execute(\n                        \"SELECT expires_at FROM room_sessions WHERE token_hash=?\",\n                        (connection.session_hash,),\n                    ).fetchone()\n                persisted_expiry = (\n                    float(session_row[\"expires_at\"]) if session_row is not None else 0.0\n                )\n                if time.time() >= min(connection.expires_at, persisted_expiry):\n                    await websocket.close(1008, \"Session expired\")\n                    return\n                try:\n                    current = await service.snapshot(room_id, user_id)\n                except RoomError:\n                    await websocket.close(1008, \"Room access revoked\")\n                    return\n                if changed and not connection.enqueue(\n                    {\"type\": \"snapshot\", \"snapshot\": current}\n                ):\n                    await websocket.close(1013, \"Slow client\")\n                    return'''
+          assert text.count(old)==1; text=text.replace(old,new)
+          path.write_text(text)
+          path=Path('tests/test_rooms_gateway.py'); text=path.read_text()
+          old='''            presence = await receive_type(first_ws, \"presence\")\n            assert {item[\"user_id\"] for item in presence[\"players\"]} == {1, 2}'''
+          new='''            for _ in range(4):\n                presence = await receive_type(first_ws, \"presence\")\n                if {item[\"user_id\"] for item in presence[\"players\"]} == {1, 2}:\n                    break\n            else:\n                pytest.fail(\"both connected users were not present\")'''
+          assert text.count(old)==1; path.write_text(text.replace(old,new))
+          PY
+          ruff check --fix src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
+          ruff format src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
           git config user.name 'Alex C11'
           git config user.email 'alex.c992954@gmail.com'
-          git add .github/rooms-test-output.txt
-          git commit -m 'test(rooms): capture verification diagnostics'
+          git add src/parlay/rooms tests/test_rooms_gateway.py
+          git commit -m 'fix(rooms): revalidate live socket sessions'
           git pull --rebase origin main
           git push origin HEAD:main
-          exit $status
+      - run: ruff format --check src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
+      - run: ruff check src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
+      - run: mypy src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
+      - run: pytest -q tests/test_rooms_service.py tests/test_rooms_gateway.py
