@@ -16,11 +16,11 @@ log = logging.getLogger("parlay")
 def main() -> int:
     try:
         config = load_config()
+        setup_logging(config.log_level)
+        app = ParlayApp(config)
     except ConfigError as exc:
         print(f"Configuration error: {exc}")
         return 2
-    setup_logging(config.log_level)
-    app = ParlayApp(config)
     try:
         asyncio.run(app.run())
     except AuthorizationError as exc:
