@@ -62,12 +62,24 @@ class ParlayApp:
         self._closing_call = False
         self._media_lock = asyncio.Lock()
         self._shutting_down = False
+        self._activity_jobs: set[asyncio.Task[None]] = set()
         self._register_commands()
 
     def _register_commands(self) -> None:
         for name in (
-            "join", "leave", "start", "stop", "status", "vc", "vcstart", "vcstop",
-            "play", "skip", "pause", "resume", "queue",
+            "join",
+            "leave",
+            "start",
+            "stop",
+            "status",
+            "vc",
+            "vcstart",
+            "vcstop",
+            "play",
+            "skip",
+            "pause",
+            "resume",
+            "queue",
         ):
             self.commands.register(name, getattr(self, f"_cmd_{name}"))
 
@@ -87,14 +99,16 @@ class ParlayApp:
             if self._media_chat_id == chat_id and self.bridge is not None:
                 return fmt.success("Parlay is already connected to this voice chat.")
             if self.sessions.active:
-                return fmt.error("Parlay is connected to another chat. Leave it before joining here.")
+                return fmt.error(
+                    "Parlay is connected to another chat. Leave it before joining here."
+                )
             if self.activity is not None and self._activity_ready:
                 await self.activity.reconcile(chat_id)
             self.sessions.begin_join(str(chat_id))
             self._media_chat_id = chat_id
 
             async def dropped() -> None:
-                await self._on_activity_unavailable(chat_id, "transport_disconnected")
+                await self._queue_activity_unavailable(chat_id, "transport_disconnected")
 
             bridge = RawAudioBridge(self.client, on_disconnect=dropped)
             try:
@@ -114,13 +128,18 @@ class ParlayApp:
                         await bridge.stop()
                     except Exception:
                         log.warning("Failed to clean up incomplete media join", exc_info=True)
-                return fmt.error("Could not connect Parlay's audio transport. Check the service log.")
+                return fmt.error(
+                    "Could not connect Parlay's audio transport. Check the service log."
+                )
             return fmt.success(f"Connected Parlay to {getattr(entity, 'title', chat_id)}.")
 
     def _build_music(self, arbiter: AudioOutputArbiter) -> MusicController:
         selector = SourceSelector(PoTokenProvider(self.config.pot_provider_url))
         return MusicController(
-            self.sessions, arbiter, TrackResolver(selector), MediaTranscoder(),
+            self.sessions,
+            arbiter,
+            TrackResolver(selector),
+            MediaTranscoder(),
             post_message=self._post_to_call,
         )
 
@@ -158,8 +177,10 @@ class ParlayApp:
     async def _missing_media(self, command: ParsedCommand) -> str:
         detail = "Parlay's audio transport is not connected."
         if (
-            self.activity is not None and self._activity_ready
-            and command.chat_id is not None and (command.is_group or command.is_channel)
+            self.activity is not None
+            and self._activity_ready
+            and command.chat_id is not None
+            and (command.is_group or command.is_channel)
         ):
             await self.activity.reconcile(command.chat_id)
             detail = await self.activity.status_text(command.chat_id)
@@ -185,8 +206,11 @@ class ParlayApp:
             return fmt.error(str(exc))
         provider = GeminiVoiceProvider(self.config.gemini_api_key, self._ai_configuration())
         ai = AiVoiceProducer(
-            provider, source=self.bridge, arbiter=self.arbiter,
-            on_loss=self._on_pipeline_loss, on_speaking=self._on_ai_speaking,
+            provider,
+            source=self.bridge,
+            arbiter=self.arbiter,
+            on_loss=self._on_pipeline_loss,
+            on_speaking=self._on_ai_speaking,
         )
         try:
             await ai.engage()
@@ -239,7 +263,9 @@ class ParlayApp:
             return fmt.error(str(exc))
         if not status.active:
             return fmt.status("No active voice chat.", "idle")
-        return fmt.status(f"Voice chat is live with {status.participants} participant(s).", "connected")
+        return fmt.status(
+            f"Voice chat is live with {status.participants} participant(s).", "connected"
+        )
 
     async def _cmd_vcstart(self, command: ParsedCommand) -> str:
         target = self._vc_target(command)
@@ -321,20 +347,41 @@ class ParlayApp:
             finally:
                 self._closing_call = False
 
+    async def _queue_activity_unavailable(self, chat_id: int, reason: str) -> None:
+        # Never wait for a media operation from a Telegram update handler.
+        # Capture the session object to reject delayed events after a rejoin.
+        session = self.sessions.session
+        if self._shutting_down or session is None or chat_id != self._media_chat_id:
+            return
+
+        async def apply() -> None:
+            if self.sessions.session is not session:
+                return
+            try:
+                await self._on_activity_unavailable(chat_id, reason)
+            except Exception:
+                log.exception("Activity cleanup failed for chat %s", chat_id)
+
+        task = asyncio.create_task(apply(), name="parlay-activity-cleanup")
+        self._activity_jobs.add(task)
+        task.add_done_callback(self._activity_jobs.discard)
+
     async def _on_activity_unavailable(self, chat_id: int, reason: str) -> None:
         if self._closing_call or self._shutting_down or chat_id != self._media_chat_id:
             return
-        if reason == "media_revoked":
-            # Admin mute does not mean we left; retain the receive connection.
-            if self.music is not None and self.music.is_active:
-                await self.music.pause()
-            await self._teardown_pipeline()
-            if self.sessions.active:
-                self.sessions.disengage_ai()
-            await self._notify_operator("Parlay was muted by an admin; outgoing playback is paused.")
-            return
         async with self._media_lock:
             if chat_id != self._media_chat_id:
+                return
+            if reason == "media_revoked":
+                # Admin mute retains the receive connection.
+                if self.music is not None and self.music.is_active:
+                    await self.music.pause()
+                await self._teardown_pipeline()
+                if self.sessions.active:
+                    self.sessions.disengage_ai()
+                await self._notify_operator(
+                    "Parlay was muted by an admin; outgoing playback is paused."
+                )
                 return
             await self._close_call()
         try:
@@ -392,7 +439,10 @@ class ParlayApp:
             self.commands.set_account(me.id, getattr(me, "username", None))
             self.membership = self._build_membership(str(me.id))
             self.activity = ActivityTracker(
-                self.client, self.config.activity_db_path, me.id, self._on_activity_unavailable,
+                self.client,
+                self.config.activity_db_path,
+                me.id,
+                self._queue_activity_unavailable,
             )
             await self.activity.start()
             self._activity_ready = True
@@ -403,6 +453,9 @@ class ParlayApp:
             await self.client.run_until_disconnected()
         finally:
             self._shutting_down = True
+            for task in tuple(self._activity_jobs):
+                task.cancel()
+            await asyncio.gather(*self._activity_jobs, return_exceptions=True)
             self.command_wrapper.uninstall()
             self.client.remove_event_handler(self._on_raw_update)
             self.client.remove_event_handler(self._on_chat_action)

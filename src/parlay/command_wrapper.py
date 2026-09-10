@@ -54,13 +54,14 @@ class TelegramCommandWrapper:
             self._seen.popitem(last=False)
         async with self._lock:
             try:
-                reply = await self.commands.dispatch(
-                    event.raw_text,
-                    event.sender_id,
-                    chat_id=event.chat_id,
-                    is_group=bool(event.is_group),
-                    is_channel=bool(event.is_channel),
-                )
+                async with asyncio.timeout(90):
+                    reply = await self.commands.dispatch(
+                        event.raw_text,
+                        event.sender_id,
+                        chat_id=event.chat_id,
+                        is_group=bool(event.is_group),
+                        is_channel=bool(event.is_channel),
+                    )
             except FloodWaitError as exc:
                 log.warning("Telegram requested a command cooldown of %s seconds", exc.seconds)
                 return

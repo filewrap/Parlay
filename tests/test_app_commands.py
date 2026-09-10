@@ -32,8 +32,12 @@ def app(monkeypatch):
 
 def channel(broadcast=False):
     return types.Channel(
-        id=202, title="Music", photo=types.ChatPhotoEmpty(), date=None,
-        broadcast=broadcast, megagroup=not broadcast,
+        id=202,
+        title="Music",
+        photo=types.ChatPhotoEmpty(),
+        date=None,
+        broadcast=broadcast,
+        megagroup=not broadcast,
     )
 
 
@@ -54,13 +58,15 @@ async def test_join_current_channel_and_repeat(app, broadcast):
 @pytest.mark.asyncio
 async def test_join_current_basic_group(app):
     entity = types.Chat(
-        id=101, title="Group", photo=types.ChatPhotoEmpty(),
-        participants_count=2, date=None, version=1,
+        id=101,
+        title="Group",
+        photo=types.ChatPhotoEmpty(),
+        participants_count=2,
+        date=None,
+        version=1,
     )
     app.vc.resolve = AsyncMock(return_value=entity)
-    assert "Connected Parlay" in await app._cmd_join(
-        ParsedCommand("join", "", "7", -101, True)
-    )
+    assert "Connected Parlay" in await app._cmd_join(ParsedCommand("join", "", "7", -101, True))
     app.vc.resolve.assert_awaited_with(-101)
 
 
