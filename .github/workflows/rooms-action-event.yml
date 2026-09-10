@@ -1,0 +1,167 @@
+name: Rooms action event verification
+
+on:
+  push:
+    paths:
+      - .github/workflows/rooms-action-event.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Apply bounded service and test changes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/parlay/rooms/service.py')
+          text = path.read_text()
+          text = text.replace('import json\nimport math\n', 'import json\nimport logging\nimport math\n', 1)
+          text = text.replace(
+              'Search = Callable[[str], Awaitable[list[dict[str, Any]]]]\n',
+              'Search = Callable[[str], Awaitable[list[dict[str, Any]]]]\nActionEvent = Callable[[str, int, str, dict[str, Any], str], Awaitable[object]]\n\nlog = logging.getLogger(__name__)\n', 1,
+          )
+          old = '''        on_reentry: Reentry | None = None,
+                  search: Search | None = None,
+              ) -> None:'''
+          new = '''        on_reentry: Reentry | None = None,
+                  search: Search | None = None,
+                  on_action: ActionEvent | None = None,
+              ) -> None:'''
+          if old not in text:
+              raise SystemExit('constructor signature mismatch')
+          text = text.replace(old, new, 1)
+          text = text.replace('        self.search = search\n', '        self.search = search\n        self.on_action = on_action\n', 1)
+
+          target = '''        self._publish(room_id, publication)
+              return output
+
+          async def _apply('''
+          replacement = '''        self._publish(room_id, publication)
+              if resolved is not None and action in {"queue_add", "force_play"} and self.on_action:
+                  event_id = f"{room_id}:{user_id}:{action_id}"
+                  try:
+                      await self.on_action(room_id, user_id, action, resolved, event_id)
+                  except Exception:
+                      log.exception("room action callback failed", extra={"event_id": event_id})
+              return output
+
+          async def _apply('''
+          if target not in text:
+              raise SystemExit('post-success insertion mismatch')
+          text = text.replace(target, replacement, 1)
+
+          old_clean = '''        if isinstance(track.get("youtube_id"), str):
+                  output["youtube_id"] = track["youtube_id"][:32]
+          '''
+          new_clean = '''        youtube_id = track.get("youtube_id")
+              if not isinstance(youtube_id, str) or len(youtube_id) != 11:
+                  from urllib.parse import parse_qs, urlsplit
+
+                  parsed = urlsplit(url)
+                  youtube_id = (
+                      parsed.path.strip("/") if parsed.netloc == "youtu.be"
+                      else parse_qs(parsed.query).get("v", [""])[0]
+                  )
+              if len(youtube_id) != 11:
+                  raise RoomError("invalid_track", "Search returned an invalid YouTube track")
+              output["youtube_id"] = youtube_id
+          '''
+          if old_clean not in text:
+              raise SystemExit('track normalization mismatch')
+          text = text.replace(old_clean, new_clean, 1)
+          path.write_text(text)
+
+          tests = Path('tests/test_rooms_service.py')
+          body = tests.read_text()
+          addition = r'''
+
+          @pytest.mark.asyncio
+          async def test_action_callback_success_failure_authorization_and_replay(tmp_path):
+              events = []
+              failures = []
+
+              async def on_action(room_id, user_id, action, track, event_id):
+                  events.append((room_id, user_id, action, track, event_id))
+                  if track["title"] == "Callback failure":
+                      failures.append(event_id)
+                      raise RuntimeError("ML unavailable")
+
+              service = RoomService(tmp_path / "rooms.db", search=search, on_action=on_action)
+              room = await service.create_personal(1, 2)
+              room = await service.join(room["id"], user(2))
+              with pytest.raises(RoomError, match="restricted"):
+                  await service.action(
+                      room["id"], 2, "denied", room["revision"], "queue_add", {"query": "Denied"}
+                  )
+              assert events == []
+
+              played = await service.action(
+                  room["id"], 1, "play-1", room["revision"], "force_play", {"query": "Played"}
+              )
+              replay = await service.action(
+                  room["id"], 1, "play-1", room["revision"], "force_play", {"query": "Played"}
+              )
+              assert replay == played
+              assert len(events) == 1
+              event = events[0]
+              assert event[:3] == (room["id"], 1, "force_play")
+              assert event[3]["youtube_id"] == "abc12345678"
+              assert event[4] == f"{room['id']}:1:play-1"
+
+              current = await service.snapshot(room["id"], 1)
+              succeeded = await service.action(
+                  room["id"],
+                  1,
+                  "play-2",
+                  current["revision"],
+                  "force_play",
+                  {"query": "Callback failure"},
+              )
+              assert succeeded["playback"]["track"]["title"] == "Callback failure"
+              assert failures == [f"{room['id']}:1:play-2"]
+              replay = await service.action(
+                  room["id"],
+                  1,
+                  "play-2",
+                  current["revision"],
+                  "force_play",
+                  {"query": "Callback failure"},
+              )
+              assert replay == succeeded
+              assert len(events) == 2
+          '''
+          addition = '\n'.join(line[10:] if line.startswith('          ') else line for line in addition.splitlines())
+          body = body.replace('"youtube_id": "abc",', '"youtube_id": "abc12345678",')
+          body = body.replace('watch?v=abc",', 'watch?v=abc12345678",')
+          if 'test_action_callback_success_failure_authorization_and_replay' not in body:
+              body += addition
+          tests.write_text(body)
+          PY
+      - name: Install and verify
+        run: |
+          python -m pip install --upgrade pip -q
+          pip install -e '.[dev]' -q
+          ruff check --fix src/parlay/rooms/service.py tests/test_rooms_service.py
+          ruff format src/parlay/rooms/service.py tests/test_rooms_service.py
+          ruff check src/parlay/rooms/service.py tests/test_rooms_service.py
+          ruff format --check src/parlay/rooms/service.py tests/test_rooms_service.py
+          pytest -q tests/test_rooms_service.py
+          mypy src/parlay/rooms/service.py
+      - name: Commit scoped files and remove runner
+        run: |
+          git config user.name "Alex C11"
+          git config user.email "alex.c992954@gmail.com"
+          git rm .github/workflows/rooms-action-event.yml
+          git add src/parlay/rooms/service.py tests/test_rooms_service.py
+          git commit -m "feat(rooms): emit idempotent playback action events"
+          git push
