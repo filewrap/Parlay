@@ -26,12 +26,15 @@ def app(monkeypatch):
     runtimes = {}
     instance.registry = Mock()
     instance.registry.get = lambda chat_id: runtimes.get(chat_id)
+
     async def join(chat_id):
         if chat_id not in runtimes:
             runtimes[chat_id] = Mock(call_id=None, generation=1)
         return runtimes[chat_id]
+
     async def leave(chat_id, reason="left"):
         runtimes.pop(chat_id, None)
+
     instance.registry.join = AsyncMock(side_effect=join)
     instance.registry.leave = AsyncMock(side_effect=leave)
     instance.registry.command = AsyncMock(return_value={"track": None, "queue": []})
@@ -39,7 +42,14 @@ def app(monkeypatch):
 
 
 def channel(broadcast=False):
-    return types.Channel(id=202, title="Music", photo=types.ChatPhotoEmpty(), date=None, broadcast=broadcast, megagroup=not broadcast)
+    return types.Channel(
+        id=202,
+        title="Music",
+        photo=types.ChatPhotoEmpty(),
+        date=None,
+        broadcast=broadcast,
+        megagroup=not broadcast,
+    )
 
 
 @pytest.mark.asyncio
@@ -57,7 +67,14 @@ async def test_join_current_channel_and_repeat(app, broadcast):
 
 @pytest.mark.asyncio
 async def test_join_current_basic_group(app):
-    entity = types.Chat(id=101, title="Group", photo=types.ChatPhotoEmpty(), participants_count=2, date=None, version=1)
+    entity = types.Chat(
+        id=101,
+        title="Group",
+        photo=types.ChatPhotoEmpty(),
+        participants_count=2,
+        date=None,
+        version=1,
+    )
     app.vc.resolve = AsyncMock(return_value=entity)
     assert "Connected Parlay" in await app._cmd_join(ParsedCommand("join", "", "7", -101, True))
     app.vc.resolve.assert_awaited_with(-101)
@@ -126,7 +143,9 @@ async def test_room_controls_use_same_registry_without_recursive_publish(app):
 
 @pytest.mark.asyncio
 async def test_authority_owner_not_any_admin(app):
-    app._participant = AsyncMock(return_value=types.ChatParticipant(user_id=9, inviter_id=7, date=None))
+    app._participant = AsyncMock(
+        return_value=types.ChatParticipant(user_id=9, inviter_id=7, date=None)
+    )
     assert not await app._authority(9, -101)
     app._participant.return_value = types.ChatParticipantCreator(user_id=9)
     assert await app._authority(9, -101)
@@ -136,7 +155,11 @@ async def test_authority_owner_not_any_admin(app):
 @pytest.mark.asyncio
 async def test_play_event_attributed_to_requester_not_other_members(app):
     app._authority = AsyncMock(return_value=True)
-    track = {"id": "abcdefghijk", "title": "A song", "source_url": "https://www.youtube.com/watch?v=abcdefghijk"}
+    track = {
+        "id": "abcdefghijk",
+        "title": "A song",
+        "source_url": "https://www.youtube.com/watch?v=abcdefghijk",
+    }
     app.search = AsyncMock(return_value=[track])
     app.compass = Mock()
     await app._play_for_user(7, -101, "song")

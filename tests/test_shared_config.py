@@ -8,7 +8,13 @@ from parlay.config import ConfigError, load_config
 @pytest.fixture
 def env(monkeypatch):
     monkeypatch.setattr("parlay.config.load_dotenv", lambda: None)
-    for key in ("BOT_TOKEN", "MINI_APP_URL", "ALLOWED_ORIGINS", "MAX_CONCURRENT_CALLS", "BACKEND_PORT"):
+    for key in (
+        "BOT_TOKEN",
+        "MINI_APP_URL",
+        "ALLOWED_ORIGINS",
+        "MAX_CONCURRENT_CALLS",
+        "BACKEND_PORT",
+    ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("TELEGRAM_API_ID", "123")
     monkeypatch.setenv("TELEGRAM_API_HASH", "test")

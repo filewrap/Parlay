@@ -26,11 +26,18 @@ class MediaSearch:
         url = urlsplit(query)
         if url.scheme or query.startswith("//"):
             if (
-                url.scheme != "https" or url.hostname not in _HOSTS
-                or url.username or url.password or url.port not in (None, 443)
+                url.scheme != "https"
+                or url.hostname not in _HOSTS
+                or url.username
+                or url.password
+                or url.port not in (None, 443)
             ):
                 raise RoomError("unsupported_source", "Use a song name or HTTPS YouTube video link")
-            video_id = url.path.strip("/") if url.hostname == "youtu.be" else parse_qs(url.query).get("v", [""])[0]
+            video_id = (
+                url.path.strip("/")
+                if url.hostname == "youtu.be"
+                else parse_qs(url.query).get("v", [""])[0]
+            )
             if not _ID.fullmatch(video_id):
                 raise RoomError("unsupported_source", "Use a direct YouTube video link")
             target = f"https://www.youtube.com/watch?v={video_id}"
@@ -44,7 +51,9 @@ class MediaSearch:
             try:
                 tracks = await asyncio.to_thread(self._probe, target)
             except Exception as exc:
-                raise RoomError("search_failed", "Music search is temporarily unavailable", 503) from exc
+                raise RoomError(
+                    "search_failed", "Music search is temporarily unavailable", 503
+                ) from exc
             if len(self._cache) >= 256:
                 self._cache.pop(next(iter(self._cache)))
             self._cache[target] = (time.monotonic() + 120, tracks)
@@ -55,9 +64,14 @@ class MediaSearch:
         from yt_dlp import YoutubeDL
 
         options = {
-            "quiet": True, "no_warnings": True, "skip_download": True,
-            "extract_flat": "in_playlist", "noplaylist": True, "socket_timeout": 10,
-            "retries": 1, "extractor_retries": 1,
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "extract_flat": "in_playlist",
+            "noplaylist": True,
+            "socket_timeout": 10,
+            "retries": 1,
+            "extractor_retries": 1,
         }
         with YoutubeDL(options) as client:
             result = client.extract_info(target, download=False)
@@ -72,7 +86,8 @@ class MediaSearch:
             if not _ID.fullmatch(video_id) or entry.get("is_live"):
                 continue
             item: dict[str, Any] = {
-                "id": video_id, "youtube_id": video_id,
+                "id": video_id,
+                "youtube_id": video_id,
                 "title": str(entry.get("title") or video_id)[:500],
                 "source_url": f"https://www.youtube.com/watch?v={video_id}",
                 "artist": str(entry.get("artist") or entry.get("uploader") or "")[:200],

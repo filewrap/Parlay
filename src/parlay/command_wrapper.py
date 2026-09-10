@@ -28,7 +28,7 @@ class TelegramCommandWrapper:
         self.client = client
         self.commands = commands
         self._seen: OrderedDict[tuple[int, int], None] = OrderedDict()
-        self._lock = asyncio.Lock()
+        self._locks: dict[int, asyncio.Lock] = {}
 
     def install(self) -> None:
         self.client.add_event_handler(self.handle, events.NewMessage(forwards=False))
@@ -52,7 +52,7 @@ class TelegramCommandWrapper:
         self._seen[key] = None
         while len(self._seen) > 2048:
             self._seen.popitem(last=False)
-        async with self._lock:
+        async with self._locks.setdefault(int(event.chat_id), asyncio.Lock()):
             try:
                 async with asyncio.timeout(90):
                     reply = await self.commands.dispatch(

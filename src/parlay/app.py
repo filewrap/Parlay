@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import time
 import uuid
 from typing import Any
 
@@ -45,7 +46,11 @@ class ParlayApp:
         self.commands = CommandHandler(config.operator_id, config.command_prefix)
         self.command_wrapper = TelegramCommandWrapper(self.client, self.commands)
         self.registry = RuntimeRegistry(
-            self.client, config, self._on_playback, self._on_closed, self._on_transport,
+            self.client,
+            config,
+            self._on_playback,
+            self._on_closed,
+            self._on_transport,
         )
         self.search = MediaSearch()
         self.activity: ActivityTracker | None = None
@@ -63,16 +68,34 @@ class ParlayApp:
         self._room_owners: dict[int, int] = {}
         self._shutting_down = False
         self._server: Any = None
-        for name in ("join", "leave", "start", "stop", "status", "vc", "vcstart", "vcstop", "play", "skip", "pause", "resume", "queue"):
+        self._people: dict[tuple[int, int], tuple[float, Any]] = {}
+        self._people_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        for name in (
+            "join",
+            "leave",
+            "start",
+            "stop",
+            "status",
+            "vc",
+            "vcstart",
+            "vcstop",
+            "play",
+            "skip",
+            "pause",
+            "resume",
+            "queue",
+        ):
             self.commands.register(name, getattr(self, f"_cmd_{name}"))
 
     def _spawn(self, awaitable: Any) -> asyncio.Task[Any]:
         task = asyncio.create_task(awaitable)
         self._jobs.add(task)
+
         def done(finished: asyncio.Task[Any]) -> None:
             self._jobs.discard(finished)
             if not finished.cancelled() and finished.exception() is not None:
                 log.error("Background operation failed", exc_info=finished.exception())
+
         task.add_done_callback(done)
         return task
 
@@ -106,7 +129,11 @@ class ParlayApp:
             chat_id = await self._resolve_target(command)
             existing = self.registry.get(chat_id)
             await self._join_chat(chat_id)
-            return fmt.success("Parlay is already connected here." if existing else "Connected Parlay to this voice chat.")
+            return fmt.success(
+                "Parlay is already connected here."
+                if existing
+                else "Connected Parlay to this voice chat."
+            )
         except (VoiceChatError, RuntimeError, ValueError) as exc:
             return fmt.error(str(exc))
 
@@ -127,7 +154,12 @@ class ParlayApp:
 
     async def _cmd_vc(self, command: ParsedCommand) -> str:
         status = await self.vc.status(await self._resolve_target(command))
-        return fmt.status(f"Voice chat active: {status.participants} participants." if status.active else "No active voice chat.", "idle")
+        return fmt.status(
+            f"Voice chat active: {status.participants} participants."
+            if status.active
+            else "No active voice chat.",
+            "idle",
+        )
 
     async def _cmd_vcstart(self, command: ParsedCommand) -> str:
         await self.vc.start(await self._resolve_target(command))
@@ -169,21 +201,66 @@ class ParlayApp:
             room = await self.rooms.ensure_group(chat_id, runtime.call_id, user_id)
         snapshot = await self.registry.command(chat_id, "play", track["source_url"])
         if self.compass is not None:
-            await asyncio.to_thread(self.compass.ingest_track, track["id"], track["title"], track.get("artist", ""), track["source_url"])
-            await asyncio.to_thread(self.compass.record_event, str(user_id), track["id"], "play", uuid.uuid4().hex, {"chat_id": chat_id, "origin": "telegram_request"})
+            await asyncio.to_thread(
+                self.compass.ingest_track,
+                track["id"],
+                track["title"],
+                track.get("artist", ""),
+                track["source_url"],
+            )
+            await asyncio.to_thread(
+                self.compass.record_event,
+                str(user_id),
+                track["id"],
+                "play",
+                uuid.uuid4().hex,
+                {"chat_id": chat_id, "origin": "telegram_request"},
+            )
         if self.rooms is not None and room is not None:
             await self.rooms.publish_playback(chat_id, snapshot)
             return await self.rooms.snapshot(room["id"], user_id)
         return {"playback": snapshot}
 
-    async def _room_playback(self, chat_id: int, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _room_action_event(
+        self,
+        room_id: str,
+        user_id: int,
+        action: str,
+        track: dict[str, Any],
+        event_id: str,
+    ) -> None:
+        if self.compass is None:
+            return
+        await asyncio.to_thread(
+            self.compass.ingest_track,
+            track["id"],
+            track["title"],
+            "",
+            track["source_url"],
+        )
+        await asyncio.to_thread(
+            self.compass.record_event,
+            str(user_id),
+            track["id"],
+            "play",
+            event_id,
+            {"room_id": room_id, "origin": action},
+        )
+
+    async def _room_playback(
+        self, chat_id: int, action: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
         # RoomService has already checked actor permissions and owns its action lock.
         # Do not publish back into RoomService while that lock is held.
         if self.registry.get(chat_id) is None:
-            raise RoomError("recovering", "Voice connection is not ready. Retry after recovery.", 409)
+            raise RoomError(
+                "recovering", "Voice connection is not ready. Retry after recovery.", 409
+            )
         if action in {"queue_add", "force_play"}:
             track = payload["track"]
-            return await self.registry.command(chat_id, "play" if action == "queue_add" else "force_play", track["source_url"])
+            return await self.registry.command(
+                chat_id, "play" if action == "queue_add" else "force_play", track["source_url"]
+            )
         return await self.registry.command(chat_id, action, {})
 
     async def _music_action(self, command: ParsedCommand, action: str) -> str:
@@ -195,7 +272,9 @@ class ParlayApp:
         snapshot = await self.registry.command(command.chat_id, action)
         if action == "queue":
             titles = [item["title"] for item in snapshot["queue"]]
-            return fmt.status("Queue:\n" + "\n".join(titles) if titles else "Queue is empty.", "queue")
+            return fmt.status(
+                "Queue:\n" + "\n".join(titles) if titles else "Queue is empty.", "queue"
+            )
         return fmt.success(f"Playback {action} applied in this chat.")
 
     async def _cmd_skip(self, command: ParsedCommand) -> str:
@@ -237,13 +316,20 @@ class ParlayApp:
             voice=self.config.gemini_voice or default.voice,
             response_modality=default.response_modality,
         )
+
         async def lost(reason: str) -> None:
             if self.registry.get(runtime.chat_id) is runtime:
                 runtime.ai = None
                 if runtime.sessions.active:
                     runtime.sessions.disengage_ai()
                 await self._notify_operator("AI voice stopped after a provider failure.")
-        ai = AiVoiceProducer(GeminiVoiceProvider(self.config.gemini_api_key, config), source=runtime.bridge, arbiter=runtime.arbiter, on_loss=lost)
+
+        ai = AiVoiceProducer(
+            GeminiVoiceProvider(self.config.gemini_api_key, config),
+            source=runtime.bridge,
+            arbiter=runtime.arbiter,
+            on_loss=lost,
+        )
         try:
             await ai.engage()
         except BaseException:
@@ -253,6 +339,19 @@ class ParlayApp:
         return fmt.success("AI voice started in this chat.")
 
     async def _participant(self, user_id: int, chat_id: int) -> Any:
+        key = (chat_id, user_id)
+        lock = self._people_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            cached = self._people.get(key)
+            if cached and cached[0] > time.monotonic():
+                return cached[1]
+            person = await self._fetch_participant(user_id, chat_id)
+            if len(self._people) >= 4096:
+                self._people.pop(next(iter(self._people)))
+            self._people[key] = (time.monotonic() + (15 if person is not None else 3), person)
+            return person
+
+    async def _fetch_participant(self, user_id: int, chat_id: int) -> Any:
         # Use each client's own entity cache. Access hashes are not portable.
         candidates = [self.client]
         if self.bot is not None and self.bot.client is not None:
@@ -321,7 +420,9 @@ class ParlayApp:
                         await self.rooms.ensure_group(chat_id, runtime.call_id, owner)
                         # Reconnect never silently replays a stale track from its beginning.
                         await self.rooms.publish_playback(chat_id, runtime.music.snapshot())
-                    await self._notify_operator(f"Voice connection recovered in {chat_id}; playback is idle.")
+                    await self._notify_operator(
+                        f"Voice connection recovered in {chat_id}; playback is idle."
+                    )
                     return
                 except Exception:
                     log.warning("Call recovery attempt failed for %s", chat_id)
@@ -332,6 +433,7 @@ class ParlayApp:
 
     async def _queue_activity_unavailable(self, chat_id: int, reason: str) -> None:
         runtime = self.registry.get(chat_id)
+
         async def apply() -> None:
             if runtime is not None and self.registry.get(chat_id) is not runtime:
                 return
@@ -350,10 +452,19 @@ class ParlayApp:
                 await self.registry.leave(chat_id, reason)
             if self.rooms is not None:
                 await self.rooms.end_group(chat_id, reason)
+
         if not self._shutting_down:
             self._spawn(apply())
 
     async def _on_raw_update(self, update: Any) -> None:
+        if isinstance(update, types.UpdateChannel):
+            chat_id = get_peer_id(types.PeerChannel(update.channel_id))
+            for key in tuple(self._people):
+                if key[0] == chat_id:
+                    self._people.pop(key, None)
+        if type(update).__name__ == "UpdateChannelParticipant":
+            chat_id = get_peer_id(types.PeerChannel(update.channel_id))
+            self._people.pop((chat_id, update.user_id), None)
         if self.activity is not None and self._activity_ready and not self._shutting_down:
             try:
                 await self.activity.handle_update(update)
@@ -361,6 +472,9 @@ class ParlayApp:
                 log.exception("Activity update failed")
 
     async def _on_chat_action(self, event: Any) -> None:
+        for key in tuple(self._people):
+            if key[0] == event.chat_id:
+                self._people.pop(key, None)
         await self._on_raw_update(event)
         if self.membership is not None:
             await self.membership.handle(event)
@@ -371,9 +485,13 @@ class ParlayApp:
     async def _reconcile_stored_rooms(self) -> None:
         if self.rooms is None:
             return
+
         def active_rooms() -> list[Any]:
             with sqlite3.connect(self.rooms.db_path) as db:
-                return db.execute("SELECT chat_id,call_id,owner_id FROM rooms WHERE kind='group' AND state!='ended'").fetchall()
+                return db.execute(
+                    "SELECT chat_id,call_id,owner_id FROM rooms WHERE kind='group' AND state!='ended'"
+                ).fetchall()
+
         for chat_id, call_id, owner_id in await asyncio.to_thread(active_rooms):
             self._room_owners[chat_id] = owner_id
             try:
@@ -397,24 +515,63 @@ class ParlayApp:
             operator = await self.client.get_entity(self.config.operator_id)
             self.commands.set_operator_id(str(operator.id))
             self._operator_peer = await self.client.get_input_entity(operator)
-            self.activity = ActivityTracker(self.client, self.config.activity_db_path, me.id, self._queue_activity_unavailable)
+            self.activity = ActivityTracker(
+                self.client, self.config.activity_db_path, me.id, self._queue_activity_unavailable
+            )
             await self.activity.start()
             self._activity_ready = True
-            self.membership = MembershipWatcher(str(me.id), [MembershipNotifier(self._notify_operator), AuditLogStore(self.config.audit_log_path)])
+            self.membership = MembershipWatcher(
+                str(me.id),
+                [
+                    MembershipNotifier(self._notify_operator),
+                    AuditLogStore(self.config.audit_log_path),
+                ],
+            )
             self.client.add_event_handler(self._on_raw_update, events.Raw())
             self.client.add_event_handler(self._on_chat_action, events.ChatAction())
             self.command_wrapper.install()
-            self.compass = await asyncio.to_thread(CompassService, self.config.ml_db_path, self.config.ml_model_dir, self.config.youtube_api_key)
+            self.compass = await asyncio.to_thread(
+                CompassService,
+                self.config.ml_db_path,
+                self.config.ml_model_dir,
+                self.config.youtube_api_key,
+            )
             if self.config.bot_token:
-                self.rooms = await asyncio.to_thread(RoomService, self.config.room_db_path, self._room_playback, authority=self._authority, member=self._member, search=self.search)
+                self.rooms = await asyncio.to_thread(
+                    RoomService,
+                    self.config.room_db_path,
+                    self._room_playback,
+                    authority=self._authority,
+                    member=self._member,
+                    search=self.search,
+                    on_action=self._room_action_event,
+                )
                 await self.rooms.start()
-                self.bot = CompanionBot(self.config, self.rooms, self.compass, self._play_for_user, self._authority)
+                self.bot = CompanionBot(
+                    self.config, self.rooms, self.compass, self._play_for_user, self._authority
+                )
                 await self.bot.start()
                 self.rooms.on_reentry = self.bot.notify_reentry
                 await self.compass.start(deliver=self.bot.deliver)
                 import uvicorn
-                gateway = create_app(self.rooms, self.config.bot_token, list(self.config.allowed_origins), self.compass, self.search)
-                self._server = uvicorn.Server(uvicorn.Config(gateway, host=self.config.backend_host, port=self.config.backend_port, access_log=False, ws_max_size=65_536, workers=1))
+
+                gateway = create_app(
+                    self.rooms,
+                    self.config.bot_token,
+                    list(self.config.allowed_origins),
+                    self.compass,
+                    self.search,
+                )
+                self._server = uvicorn.Server(
+                    uvicorn.Config(
+                        gateway,
+                        host=self.config.backend_host,
+                        port=self.config.backend_port,
+                        access_log=False,
+                        ws_max_size=65_536,
+                        workers=1,
+                    )
+                )
                 server_task = asyncio.create_task(self._server.serve(), name="rooms-asgi")
                 self._spawn(self._reconcile_stored_rooms())
             else:

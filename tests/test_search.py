@@ -9,7 +9,18 @@ from parlay.search import MediaSearch
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("query", ["http://127.0.0.1/x", "https://localhost/x", "file:///etc/passwd", "https://youtube.com.evil.test/watch?v=abcdefghijk", "https://youtube.com@evil.test/watch?v=abcdefghijk", "//localhost/x", "https://www.youtube.com/redirect?q=http://localhost"])
+@pytest.mark.parametrize(
+    "query",
+    [
+        "http://127.0.0.1/x",
+        "https://localhost/x",
+        "file:///etc/passwd",
+        "https://youtube.com.evil.test/watch?v=abcdefghijk",
+        "https://youtube.com@evil.test/watch?v=abcdefghijk",
+        "//localhost/x",
+        "https://www.youtube.com/redirect?q=http://localhost",
+    ],
+)
 async def test_reject_unsafe_sources(query):
     search = MediaSearch()
     search._probe = Mock()

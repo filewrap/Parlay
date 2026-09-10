@@ -84,8 +84,12 @@ def load_config() -> Config:
             parsed = urlsplit(origin)
             local = parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1"}
             if (
-                not parsed.hostname or parsed.username or parsed.path or parsed.query
-                or parsed.fragment or (parsed.scheme != "https" and not local)
+                not parsed.hostname
+                or parsed.username
+                or parsed.path
+                or parsed.query
+                or parsed.fragment
+                or (parsed.scheme != "https" and not local)
                 or "*" in origin
             ):
                 raise ConfigError("ALLOWED_ORIGINS must contain exact HTTPS origins")
