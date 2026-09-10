@@ -1,47 +1,26 @@
-"""Application wiring: builds the Telethon client, registers commands, runs.
+"""Wire Telegram commands, observed call activity, and the native audio runtime.
 
-The command handlers drive the CallSessionManager and the RawAudioBridge.
-Join brings up the raw audio bridge, the Audio Output Arbiter, and the music
-controller; leave tears them down and releases buffers. `/start` engages the AI
-Voice Pipeline as a producer behind the Arbiter over the bridge's Captured
-Stream and Playback Sink; `/stop` is context-aware: it stops music when music
-is playing, otherwise it disengages the AI pipeline. Music and AI share the one
-Arbiter, so they never play at once (REQ-INJ-006).
-
-The music commands (play/skip/pause/resume/queue) are handled by the
-MusicController, which resolves tracks through the Media Sourcing Pipeline and
-plays them through the Arbiter.
-
-The Group Membership Audit watches the same user session for ChatAction updates
-that add or remove Parlay's own account, privately notifying the Operator and
-appending to an Operator-local audit log.
-
-An unexpected call drop is reported to the Operator and ends the session so a
-later join can succeed (REQ-BOT-006).
-
-All outgoing messages are formatted through the shared presentation layer.
-
-Telethon usage: the client is built and authorized in `client.py`; commands are
-received through an `events.NewMessage` handler filtered to the Operator via
-`from_users` (so non-operator messages never reach the handler), and membership
-changes through `events.ChatAction`. All chat-side Telegram actions go through
-the VoiceChatController in `vc.py`: `/join` resolves the target entity and
-verifies a live voice chat before the media layer connects, `/vcstart` and
-`/vcstop` create and discard the voice chat itself, `/vc` reports its status,
-and every in-call message is sent only after a can-send permission check.
+Telegram owns observed call state. ActivityTracker reconciles raw updates and
+persists observations. A manual join in another Telegram client does not create
+an audio transport in this process. Commands retain their originating chat.
+The media runtime still supports one call; concurrent runtimes are separate work.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from telethon import events
+from telethon.utils import get_peer_id
 
 from . import presentation as fmt
+from .activity import ActivityTracker
 from .audio.arbiter import AudioOutputArbiter
 from .audio.bridge import RawAudioBridge
 from .client import build_client, start_authorized
+from .command_wrapper import TelegramCommandWrapper
 from .commands import CommandHandler, ParsedCommand
 from .config import Config
 from .media.po_token import PoTokenProvider
@@ -62,92 +41,90 @@ log = logging.getLogger(__name__)
 
 
 class ParlayApp:
-    """Owns the client, command handler, session manager, and audio bridge."""
+    """Own Telegram interfaces and reconcile them with the audio runtime."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
         self.client = build_client(config)
         self.sessions = CallSessionManager()
         self.commands = CommandHandler(config.operator_id, config.command_prefix)
+        self.command_wrapper = TelegramCommandWrapper(self.client, self.commands)
         self.vc = VoiceChatController(self.client)
         self.bridge: RawAudioBridge | None = None
         self.arbiter: AudioOutputArbiter | None = None
         self.ai: AiVoiceProducer | None = None
         self.music: MusicController | None = None
         self.membership: MembershipWatcher | None = None
-        # Resolved InputPeer for the Operator; set at startup and reused for
-        # every private notification so no repeat resolution is needed.
+        self.activity: ActivityTracker | None = None
+        self._activity_ready = False
         self._operator_peer: Any | None = None
+        self._media_chat_id: int | None = None
+        self._closing_call = False
+        self._media_lock = asyncio.Lock()
+        self._shutting_down = False
         self._register_commands()
 
     def _register_commands(self) -> None:
-        self.commands.register("join", self._cmd_join)
-        self.commands.register("leave", self._cmd_leave)
-        self.commands.register("start", self._cmd_start)
-        self.commands.register("stop", self._cmd_stop)
-        self.commands.register("status", self._cmd_status)
-        self.commands.register("vc", self._cmd_vc)
-        self.commands.register("vcstart", self._cmd_vcstart)
-        self.commands.register("vcstop", self._cmd_vcstop)
-        self.commands.register("play", self._cmd_play)
-        self.commands.register("skip", self._cmd_skip)
-        self.commands.register("pause", self._cmd_pause)
-        self.commands.register("resume", self._cmd_resume)
-        self.commands.register("queue", self._cmd_queue)
+        for name in (
+            "join", "leave", "start", "stop", "status", "vc", "vcstart", "vcstop",
+            "play", "skip", "pause", "resume", "queue",
+        ):
+            self.commands.register(name, getattr(self, f"_cmd_{name}"))
 
     async def _cmd_join(self, command: ParsedCommand) -> str:
-        if not command.args:
-            return fmt.error("Usage: join <chat>")
-        # Resolve through Telethon and confirm a live voice chat before the
-        # media layer connects, so failures are precise and Telegram-authored.
-        try:
-            entity = await self.vc.resolve(command.args)
-            vc_status = await self.vc.status(entity)
-        except VoiceChatError as exc:
-            return fmt.error(str(exc))
-        if not vc_status.active:
-            return fmt.error("No active voice chat there. Start one with vcstart.")
-        target = command.args
-        try:
-            self.sessions.begin_join(target)
-        except SessionError as exc:
-            return fmt.error(str(exc))
-        # Bring up the raw audio bridge for this session, wiring drop detection.
-        bridge = RawAudioBridge(self.client, on_disconnect=self._on_call_dropped)
-        try:
-            await bridge.start(entity)
-        except Exception as exc:  # roll back the session on join failure
-            log.exception("failed to start raw audio bridge")
-            self.sessions.end()
-            return fmt.error(f"Could not join {target}: {exc}")
-        self.bridge = bridge
-        # The Arbiter owns the single call output; producers request it through
-        # the Arbiter so AI and music never mix (REQ-INJ-006).
-        self.arbiter = AudioOutputArbiter(bridge)
-        self.music = self._build_music(self.arbiter)
-        self.sessions.mark_connected()
-        return fmt.success(f"Joined {target}.")
+        target = command.join_target()
+        if target is None:
+            return fmt.error("Use /join in a group/channel, or /join <chat> in private messages.")
+        async with self._media_lock:
+            try:
+                entity = await self.vc.resolve(target)
+                status = await self.vc.status(entity)
+            except VoiceChatError as exc:
+                return fmt.error(str(exc))
+            if not status.active:
+                return fmt.error("No active voice chat in that group/channel.")
+            chat_id = get_peer_id(entity)
+            if self._media_chat_id == chat_id and self.bridge is not None:
+                return fmt.success("Parlay is already connected to this voice chat.")
+            if self.sessions.active:
+                return fmt.error("Parlay is connected to another chat. Leave it before joining here.")
+            if self.activity is not None and self._activity_ready:
+                await self.activity.reconcile(chat_id)
+            self.sessions.begin_join(str(chat_id))
+            self._media_chat_id = chat_id
+
+            async def dropped() -> None:
+                await self._on_activity_unavailable(chat_id, "transport_disconnected")
+
+            bridge = RawAudioBridge(self.client, on_disconnect=dropped)
+            try:
+                await bridge.start(entity)
+                self.bridge = bridge
+                self.arbiter = AudioOutputArbiter(bridge)
+                self.music = self._build_music(self.arbiter)
+                self.sessions.mark_connected()
+                if self.activity is not None and self._activity_ready:
+                    await self.activity.set_transport(chat_id, True)
+            except Exception:
+                log.exception("Could not connect media transport for chat %s", chat_id)
+                await self._close_call()
+                # start can fail before the bridge becomes the active bridge.
+                if self.bridge is not bridge:
+                    try:
+                        await bridge.stop()
+                    except Exception:
+                        log.warning("Failed to clean up incomplete media join", exc_info=True)
+                return fmt.error("Could not connect Parlay's audio transport. Check the service log.")
+            return fmt.success(f"Connected Parlay to {getattr(entity, 'title', chat_id)}.")
 
     def _build_music(self, arbiter: AudioOutputArbiter) -> MusicController:
-        """Assemble the Media Sourcing Pipeline and MusicController for a session."""
-        po_tokens = PoTokenProvider(self.config.pot_provider_url)
-        selector = SourceSelector(po_tokens)
-        resolver = TrackResolver(selector)
-        transcoder = MediaTranscoder()
+        selector = SourceSelector(PoTokenProvider(self.config.pot_provider_url))
         return MusicController(
-            self.sessions,
-            arbiter,
-            resolver,
-            transcoder,
+            self.sessions, arbiter, TrackResolver(selector), MediaTranscoder(),
             post_message=self._post_to_call,
         )
 
     def _ai_configuration(self) -> SessionConfiguration:
-        """Build the Session Configuration from config, over the default.
-
-        Any of model / voice / persona left unset falls back to the provider's
-        native-audio default (REQ-AIVP-007.2/.3).
-        """
         default = default_configuration()
         return SessionConfiguration(
             model=self.config.gemini_model or default.model,
@@ -157,69 +134,72 @@ class ParlayApp:
         )
 
     async def _post_to_call(self, text: str) -> None:
-        """Post an in-call message to the active Call Session's chat.
-
-        Sends through the VoiceChatController, which verifies Parlay may send
-        in that chat first; a denied send is logged, never raised mid-call.
-        """
-        session = self.sessions.session
-        if session is None:
+        if self._media_chat_id is None:
             return
         try:
-            await self.vc.send_message(session.chat, text)
+            await self.vc.send_message(self._media_chat_id, text)
         except VoiceChatError as exc:
-            log.warning("in-call message suppressed: %s", exc)
+            log.warning("In-call message suppressed: %s", exc)
 
     async def _notify_operator(self, text: str) -> None:
-        """Send a private message to the Operator's own account.
-
-        Membership alerts go here and never into a triggering chat (ADR-001).
-        Uses the InputPeer resolved at startup, falling back to the configured
-        id so a notification is never dropped.
-        """
         target = self._operator_peer if self._operator_peer is not None else self.config.operator_id
         await self.client.send_message(target, text)
 
     async def _on_ai_speaking(self) -> None:
-        """Announce in-call that the AI is speaking (REQ-AIVP-008.1)."""
         await self._post_to_call(fmt.status("The AI is speaking.", "speaking"))
 
+    def _wrong_chat(self, command: ParsedCommand) -> bool:
+        return bool(
+            (command.is_group or command.is_channel)
+            and command.chat_id != self._media_chat_id
+            and self._media_chat_id is not None
+        )
+
+    async def _missing_media(self, command: ParsedCommand) -> str:
+        detail = "Parlay's audio transport is not connected."
+        if (
+            self.activity is not None and self._activity_ready
+            and command.chat_id is not None and (command.is_group or command.is_channel)
+        ):
+            await self.activity.reconcile(command.chat_id)
+            detail = await self.activity.status_text(command.chat_id)
+        return fmt.error(f"{detail} Use /join here to connect Parlay's audio transport.")
+
     async def _cmd_leave(self, command: ParsedCommand) -> str:
-        try:
-            self.sessions.end()
-        except SessionError as exc:
-            return fmt.error(str(exc))
-        await self._teardown_pipeline()
-        await self._teardown_bridge()
+        async with self._media_lock:
+            if self._wrong_chat(command):
+                return fmt.error("Parlay is connected to a different chat.")
+            if not self.sessions.active:
+                return await self._missing_media(command)
+            await self._close_call()
         return fmt.success("Left the voice chat.")
 
     async def _cmd_start(self, command: ParsedCommand) -> str:
+        if self._wrong_chat(command):
+            return fmt.error("Parlay is connected to a different chat.")
         if self.bridge is None or self.arbiter is None:
-            return fmt.error("Join a voice chat first.")
+            return await self._missing_media(command)
         try:
             self.sessions.engage_ai()
         except SessionError as exc:
             return fmt.error(str(exc))
         provider = GeminiVoiceProvider(self.config.gemini_api_key, self._ai_configuration())
         ai = AiVoiceProducer(
-            provider,
-            source=self.bridge,
-            arbiter=self.arbiter,
-            on_loss=self._on_pipeline_loss,
-            on_speaking=self._on_ai_speaking,
+            provider, source=self.bridge, arbiter=self.arbiter,
+            on_loss=self._on_pipeline_loss, on_speaking=self._on_ai_speaking,
         )
         try:
             await ai.engage()
-        except ProviderError as exc:
-            # Do not leave the pipeline engaged if the session cannot open.
+        except ProviderError:
             self.sessions.disengage_ai()
-            log.exception("failed to engage AI voice pipeline")
-            return fmt.error(f"Could not engage the AI pipeline: {exc}")
+            log.exception("Failed to engage AI voice pipeline")
+            return fmt.error("Could not engage the AI pipeline. Check the service log.")
         self.ai = ai
         return fmt.success("AI voice pipeline engaged.")
 
     async def _cmd_stop(self, command: ParsedCommand) -> str:
-        # Context-aware: stop music when music is playing, else disengage the AI.
+        if self._wrong_chat(command):
+            return fmt.error("Parlay is connected to a different chat.")
         if self.music is not None and self.music.is_active:
             return await self.music.stop()
         try:
@@ -230,36 +210,41 @@ class ParlayApp:
         return fmt.success("AI voice pipeline stopped.")
 
     async def _cmd_status(self, command: ParsedCommand) -> str:
-        icon_key = "connected" if self.sessions.active else "idle"
-        return fmt.status(self.sessions.status_text(), icon_key)
+        target = command.join_target()
+        if target is None:
+            target = self._media_chat_id
+        if target is not None and self.activity is not None and self._activity_ready:
+            try:
+                entity = await self.vc.resolve(target)
+                chat_id = get_peer_id(entity)
+                # get_active_call also verifies the entity is a group/channel.
+                await self.vc.get_active_call(entity)
+                await self.activity.reconcile(chat_id)
+                return fmt.status(await self.activity.status_text(chat_id), "idle")
+            except VoiceChatError as exc:
+                return fmt.error(str(exc))
+        return fmt.status(self.sessions.status_text(), "connected" if self.bridge else "idle")
 
     def _vc_target(self, command: ParsedCommand) -> Any | None:
-        """The chat a VC command acts on: explicit arg, else the session chat."""
-        if command.args:
-            return command.args
-        session = self.sessions.session
-        return session.chat if session is not None else None
+        target = command.join_target()
+        return target if target is not None else self._media_chat_id
 
     async def _cmd_vc(self, command: ParsedCommand) -> str:
-        """Report the voice-chat status of a chat (arg or the session chat)."""
         target = self._vc_target(command)
         if target is None:
-            return fmt.error("Usage: vc <chat> (or join a voice chat first).")
+            return fmt.error("Use /vc in a group/channel or /vc <chat>.")
         try:
-            vc_status = await self.vc.status(target)
+            status = await self.vc.status(target)
         except VoiceChatError as exc:
             return fmt.error(str(exc))
-        if not vc_status.active:
+        if not status.active:
             return fmt.status("No active voice chat.", "idle")
-        title = f" {vc_status.title!r}" if vc_status.title else ""
-        count = vc_status.participants
-        return fmt.status(f"Voice chat{title} is live with {count} participant(s).", "connected")
+        return fmt.status(f"Voice chat is live with {status.participants} participant(s).", "connected")
 
     async def _cmd_vcstart(self, command: ParsedCommand) -> str:
-        """Start a voice chat in the target chat (needs admin rights)."""
         target = self._vc_target(command)
         if target is None:
-            return fmt.error("Usage: vcstart <chat>")
+            return fmt.error("Use /vcstart in a group/channel or /vcstart <chat>.")
         try:
             await self.vc.start(target)
         except VoiceChatError as exc:
@@ -267,155 +252,164 @@ class ParlayApp:
         return fmt.success("Voice chat started.")
 
     async def _cmd_vcstop(self, command: ParsedCommand) -> str:
-        """Discard the target chat's voice chat (needs admin rights)."""
         target = self._vc_target(command)
         if target is None:
-            return fmt.error("Usage: vcstop <chat>")
+            return fmt.error("Use /vcstop in a group/channel or /vcstop <chat>.")
         try:
             await self.vc.stop(target)
         except VoiceChatError as exc:
             return fmt.error(str(exc))
-        # If Parlay was in that call, the drop handler will end the session.
         return fmt.success("Voice chat stopped.")
 
-    async def _cmd_play(self, command: ParsedCommand) -> str:
+    async def _music_command(self, command: ParsedCommand, method: str) -> str:
+        if self._wrong_chat(command):
+            return fmt.error("Parlay is connected to a different chat.")
         if self.music is None:
-            return fmt.error("Join a voice chat first.")
-        return await self.music.play(command.args)
+            return await self._missing_media(command)
+        if method == "play":
+            return await self.music.play(command.args)
+        result: str = await getattr(self.music, method)()
+        return result
+
+    async def _cmd_play(self, command: ParsedCommand) -> str:
+        return await self._music_command(command, "play")
 
     async def _cmd_skip(self, command: ParsedCommand) -> str:
-        if self.music is None:
-            return fmt.error("Join a voice chat first.")
-        return await self.music.skip()
+        return await self._music_command(command, "skip")
 
     async def _cmd_pause(self, command: ParsedCommand) -> str:
-        if self.music is None:
-            return fmt.error("Join a voice chat first.")
-        return await self.music.pause()
+        return await self._music_command(command, "pause")
 
     async def _cmd_resume(self, command: ParsedCommand) -> str:
-        if self.music is None:
-            return fmt.error("Join a voice chat first.")
-        return await self.music.resume()
+        return await self._music_command(command, "resume")
 
     async def _cmd_queue(self, command: ParsedCommand) -> str:
-        if self.music is None:
-            return fmt.error("Join a voice chat first.")
-        return await self.music.show_queue()
+        return await self._music_command(command, "show_queue")
 
     async def _teardown_pipeline(self) -> None:
-        if self.ai is not None:
-            await self.ai.disengage()
-            self.ai = None
+        ai, self.ai = self.ai, None
+        if ai is not None:
+            await ai.disengage()
 
     async def _teardown_bridge(self) -> None:
-        if self.music is not None:
-            await self.music.on_session_end()
-            self.music = None
-        if self.bridge is not None:
-            await self.bridge.stop()
-            self.bridge = None
+        music, self.music = self.music, None
+        bridge, self.bridge = self.bridge, None
         self.arbiter = None
+        try:
+            if music is not None:
+                await music.on_session_end()
+        finally:
+            if bridge is not None:
+                await bridge.stop()
+
+    async def _close_call(self) -> None:
+        if self._closing_call:
+            return
+        self._closing_call = True
+        chat_id, self._media_chat_id = self._media_chat_id, None
+        try:
+            try:
+                await self._teardown_pipeline()
+            finally:
+                await self._teardown_bridge()
+        finally:
+            if self.sessions.active:
+                self.sessions.end()
+            try:
+                if chat_id is not None and self.activity is not None and self._activity_ready:
+                    await self.activity.set_transport(chat_id, False)
+            finally:
+                self._closing_call = False
+
+    async def _on_activity_unavailable(self, chat_id: int, reason: str) -> None:
+        if self._closing_call or self._shutting_down or chat_id != self._media_chat_id:
+            return
+        if reason == "media_revoked":
+            # Admin mute does not mean we left; retain the receive connection.
+            if self.music is not None and self.music.is_active:
+                await self.music.pause()
+            await self._teardown_pipeline()
+            if self.sessions.active:
+                self.sessions.disengage_ai()
+            await self._notify_operator("Parlay was muted by an admin; outgoing playback is paused.")
+            return
+        async with self._media_lock:
+            if chat_id != self._media_chat_id:
+                return
+            await self._close_call()
+        try:
+            await self._notify_operator(f"Parlay's call in {chat_id} ended ({reason}).")
+        except Exception:
+            log.warning("Cannot notify operator about ended call", exc_info=True)
 
     async def _on_call_dropped(self) -> None:
-        """Handle an unexpected voice-chat disconnect (REQ-BOT-006).
-
-        End the Call Session, tear down the AI pipeline and bridge to release
-        resources so a later join succeeds, and report the drop to the Operator.
-        """
-        if not self.sessions.active:
-            return
-        chat = self.sessions.session.chat if self.sessions.session else None
-        log.warning("voice chat connection dropped; ending session")
-        await self._teardown_pipeline()
-        await self._teardown_bridge()
-        try:
-            self.sessions.end()
-        except SessionError:
-            pass
-        if chat is not None:
-            try:
-                await self.client.send_message(
-                    chat, fmt.error("Voice chat connection dropped; the session has ended.")
-                )
-            except Exception:
-                log.exception("failed to notify Operator of call drop")
+        if self._media_chat_id is not None:
+            await self._on_activity_unavailable(self._media_chat_id, "transport_disconnected")
 
     async def _on_pipeline_loss(self, reason: str) -> None:
-        """Called when the pipeline disengages itself after an unrecoverable loss."""
         self.ai = None
-        try:
+        if self.sessions.active:
             self.sessions.disengage_ai()
-        except SessionError:
-            pass
-        session = self.sessions.session
-        if session is not None:
+        await self._post_to_call(fmt.error(f"The AI encountered an error: {reason}"))
+
+    async def _on_message(self, event: Any) -> None:
+        await self.command_wrapper.handle(event)
+
+    async def _on_raw_update(self, update: Any) -> None:
+        if self.activity is not None and self._activity_ready and not self._shutting_down:
             try:
-                await self.client.send_message(
-                    session.chat, fmt.error(f"The AI encountered an error: {reason}")
-                )
+                await self.activity.handle_update(update)
             except Exception:
-                log.exception("failed to notify Operator of pipeline loss")
+                log.exception("Failed to process Telegram activity update")
 
-    async def _on_message(self, event: events.NewMessage.Event) -> None:
-        """Handle an incoming Operator command.
-
-        The handler is registered with a `from_users` filter, so it only fires
-        for the Operator; the CommandHandler still gates defensively.
-        """
-        reply = await self.commands.dispatch(event.raw_text, event.sender_id)
-        if reply is not None:
-            await event.reply(reply)
-
-    async def _on_chat_action(self, event: events.ChatAction.Event) -> None:
-        """Route a ChatAction update to the Group Membership Audit."""
-        if self.membership is None:
-            return
-        try:
-            await self.membership.handle(event)
-        except Exception:
-            log.exception("failed to handle chat action for membership audit")
+    async def _on_chat_action(self, event: Any) -> None:
+        await self._on_raw_update(event)
+        if self.membership is not None:
+            try:
+                await self.membership.handle(event)
+            except Exception:
+                log.exception("Failed to audit membership update")
 
     def _build_membership(self, self_id: str) -> MembershipWatcher:
-        """Assemble the membership notifier, audit log, and watcher."""
         notifier = MembershipNotifier(self._notify_operator)
-        store = AuditLogStore(self.config.audit_log_path)
-        return MembershipWatcher(self_id, [notifier, store])
+        return MembershipWatcher(self_id, [notifier, AuditLogStore(self.config.audit_log_path)])
 
     async def _resolve_operator(self) -> Any | None:
-        """Resolve the configured Operator to an InputPeer for gating and DMs.
-
-        Accepts a numeric id, username, or phone (per Telethon's entity rules).
-        On success the numeric id also becomes the CommandHandler's gate so a
-        username-configured Operator still matches incoming sender ids.
-        """
         try:
             entity = await self.client.get_entity(self.config.operator_id)
         except (ValueError, TypeError):
-            log.warning(
-                "could not resolve OPERATOR_ID %r; gating by raw id", self.config.operator_id
-            )
+            log.warning("Could not resolve operator; retaining configured identity gate")
             return None
         self._operator_peer = await self.client.get_input_entity(entity)
         self.commands.set_operator_id(str(entity.id))
         return entity
 
     async def run(self) -> None:
-        """Start the client and process messages until disconnected."""
         await start_authorized(self.client)
-        me = await self.client.get_me()
-        operator = await self._resolve_operator()
-        # Filter command messages to the Operator at the Telethon layer; fall
-        # back to an unfiltered handler if the Operator could not be resolved.
-        from_users = [operator] if operator is not None else None
-        self.client.add_event_handler(
-            self._on_message, events.NewMessage(incoming=True, from_users=from_users)
-        )
-        self.client.add_event_handler(self._on_chat_action, events.ChatAction())
-        # The Membership Audit keys off Parlay's own account id.
-        self.membership = self._build_membership(str(me.id))
-        log.info("Parlay is online as %s", getattr(me, "username", None) or me.id)
         try:
+            me = await self.client.get_me()
+            await self._resolve_operator()
+            self.commands.set_account(me.id, getattr(me, "username", None))
+            self.membership = self._build_membership(str(me.id))
+            self.activity = ActivityTracker(
+                self.client, self.config.activity_db_path, me.id, self._on_activity_unavailable,
+            )
+            await self.activity.start()
+            self._activity_ready = True
+            self.client.add_event_handler(self._on_raw_update, events.Raw())
+            self.client.add_event_handler(self._on_chat_action, events.ChatAction())
+            self.command_wrapper.install()
+            log.info("Parlay is online; command and activity listeners registered")
             await self.client.run_until_disconnected()
         finally:
-            await self.client.disconnect()
+            self._shutting_down = True
+            self.command_wrapper.uninstall()
+            self.client.remove_event_handler(self._on_raw_update)
+            self.client.remove_event_handler(self._on_chat_action)
+            try:
+                await self._close_call()
+            finally:
+                self._activity_ready = False
+                if self.activity is not None:
+                    await self.activity.stop()
+                await self.client.disconnect()

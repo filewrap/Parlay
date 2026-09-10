@@ -1,8 +1,4 @@
-"""Configuration loading for Parlay.
-
-All runtime configuration comes from environment variables (optionally loaded
-from a local .env file). No secrets are hard-coded.
-"""
+"""Environment configuration. Secrets are never hard-coded."""
 
 from __future__ import annotations
 
@@ -13,13 +9,11 @@ from dotenv import load_dotenv
 
 
 class ConfigError(RuntimeError):
-    """Raised when required configuration is missing or malformed."""
+    """A required configuration value is missing or malformed."""
 
 
 @dataclass(frozen=True)
 class Config:
-    """Immutable snapshot of Parlay's runtime configuration."""
-
     api_id: int
     api_hash: str
     session: str
@@ -33,6 +27,7 @@ class Config:
     gemini_voice: str | None
     gemini_persona: str | None
     audit_log_path: str
+    activity_db_path: str = "data/parlay.sqlite3"
 
 
 def _require(name: str) -> str:
@@ -43,38 +38,28 @@ def _require(name: str) -> str:
 
 
 def _optional(name: str) -> str | None:
-    value = os.environ.get(name, "").strip()
-    return value or None
+    return os.environ.get(name, "").strip() or None
 
 
 def load_config() -> Config:
-    """Load and validate configuration from the environment.
-
-    Reads a .env file if present, then validates required keys.
-    """
     load_dotenv()
-
-    raw_api_id = _require("TELEGRAM_API_ID")
     try:
-        api_id = int(raw_api_id)
+        api_id = int(_require("TELEGRAM_API_ID"))
     except ValueError as exc:
         raise ConfigError("TELEGRAM_API_ID must be an integer") from exc
-
     return Config(
         api_id=api_id,
         api_hash=_require("TELEGRAM_API_HASH"),
         session=os.environ.get("TELEGRAM_SESSION", "parlay.session").strip(),
-        # Existing session files take precedence. Without one, client.py uses
-        # this portable credential or detects a string in TELEGRAM_SESSION.
         string_session=_optional("TELEGRAM_STRING_SESSION"),
         operator_id=_require("OPERATOR_ID"),
         gemini_api_key=_require("GEMINI_API_KEY"),
-        pot_provider_url=os.environ.get("POT_PROVIDER_URL", "http://127.0.0.1:4416").strip(),
-        command_prefix=os.environ.get("COMMAND_PREFIX", "/").strip() or "/",
-        log_level=os.environ.get("LOG_LEVEL", "INFO").strip().upper(),
+        pot_provider_url=_optional("POT_PROVIDER_URL") or "http://127.0.0.1:4416",
+        command_prefix=_optional("COMMAND_PREFIX") or "/",
+        log_level=(_optional("LOG_LEVEL") or "INFO").upper(),
         gemini_model=_optional("GEMINI_MODEL"),
         gemini_voice=_optional("GEMINI_VOICE"),
         gemini_persona=_optional("GEMINI_PERSONA"),
-        audit_log_path=os.environ.get("AUDIT_LOG_PATH", "parlay-membership.log").strip()
-        or "parlay-membership.log",
+        audit_log_path=_optional("AUDIT_LOG_PATH") or "parlay-membership.log",
+        activity_db_path=_optional("ACTIVITY_DB_PATH") or "data/parlay.sqlite3",
     )
