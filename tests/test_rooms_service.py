@@ -96,3 +96,39 @@ async def test_group_membership_authority_and_isolation(tmp_path):
         100, {"track": TRACK, "status": "playing", "position_seconds": 0, "queue": []}
     )
     assert (await service.snapshot(b["id"], 9))["playback"]["track"] is None
+
+
+@pytest.mark.asyncio
+async def test_duration_override_expires_on_background_sweep(tmp_path):
+    service = RoomService(tmp_path / "rooms.db")
+    room = await service.create_personal(1, duration=600)
+    room = await service.action(
+        room["id"], 1, "shorten", room["revision"], "settings", {"duration": 300}
+    )
+    with service._connect() as db:
+        row = db.execute("SELECT data_json FROM rooms WHERE id=?", (room["id"],)).fetchone()
+        data = __import__("json").loads(row["data_json"])
+        data["expires_override"] = time.time() - 1
+        db.execute(
+            "UPDATE rooms SET data_json=? WHERE id=?",
+            (__import__("json").dumps(data), room["id"]),
+        )
+    service._expire_due()
+    with pytest.raises(RoomError, match=r"expired|ended"):
+        await service.snapshot(room["id"], 1)
+
+
+@pytest.mark.asyncio
+async def test_moderator_cannot_kick_another_moderator(tmp_path):
+    service = RoomService(tmp_path / "rooms.db")
+    room = await service.create_personal(1, 2, 3)
+    room = await service.join(room["id"], user(2))
+    room = await service.join(room["id"], user(3))
+    room = await service.action(
+        room["id"], 1, "mod-2", room["revision"], "moderator", {"user_id": 2, "enabled": True}
+    )
+    room = await service.action(
+        room["id"], 1, "mod-3", room["revision"], "moderator", {"user_id": 3, "enabled": True}
+    )
+    with pytest.raises(RoomError, match="cannot be removed"):
+        await service.action(room["id"], 2, "kick-3", room["revision"], "kick", {"user_id": 3})

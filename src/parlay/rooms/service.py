@@ -436,7 +436,15 @@ class RoomService:
                 playback_call = (row["chat_id"], action, {})
         elif action == "kick":
             target = self._target(payload)
-            if not (owner or moderator) or target == row["owner_id"]:
+            target_member = next(
+                (item for item in data["members"] if item["user_id"] == target), None
+            )
+            protected_moderator = (
+                moderator
+                and target_member is not None
+                and target_member["role"] in {"owner", "moderator"}
+            )
+            if not (owner or moderator) or target == row["owner_id"] or protected_moderator:
                 raise RoomError("moderation_forbidden", "This member cannot be removed", 403)
             data["members"] = [m for m in data["members"] if m["user_id"] != target]
             if target not in data["kicked"]:
@@ -738,10 +746,21 @@ class RoomService:
             )
 
     def _expire_due(self):
+        now = time.time()
         with self._connect() as db:
-            db.execute(
-                "UPDATE rooms SET state='ended',end_reason='expired',revision=revision+1 WHERE kind='personal' AND state!='ended' AND expires_at IS NOT NULL AND expires_at<=?",
-                (time.time(),),
+            rows = db.execute(
+                "SELECT id,expires_at,data_json FROM rooms WHERE kind='personal' AND state!='ended'"
+            ).fetchall()
+            expired = []
+            for row in rows:
+                data = json.loads(row["data_json"])
+                expires_at = data.get("expires_override", row["expires_at"])
+                if expires_at is not None and expires_at <= now:
+                    expired.append((row["id"],))
+            db.executemany(
+                "UPDATE rooms SET state='ended',end_reason='expired',"
+                "revision=revision+1 WHERE id=? AND state!='ended'",
+                expired,
             )
 
     async def _expiry_loop(self):

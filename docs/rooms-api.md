@@ -10,7 +10,7 @@ Construct `RoomService(db_path, playback)` and optionally pass `authority=`, `me
 
 `playback(chat_id, action, payload)` is async and can return the current playback snapshot. `authority(user_id, chat_id)` and `member(user_id, chat_id)` can be sync or async. Group admission fails closed if `member` is absent. Group settings and close fail closed if `authority` is absent. `on_reentry(owner_id, room_id, user_id)` can be sync or async.
 
-Create the ASGI application with `create_app(service, bot_token, allowed_origins, compass=None, search=None)`. Startup refuses an empty bot token or an empty/non-explicit origin list. Keep bot tokens and Telegram session credentials outside browser configuration.
+Create the ASGI application with `create_app(service, bot_token, allowed_origins, compass=None, search=None)`. The gateway does not start or stop `RoomService`; the parent owns that lifecycle. Startup refuses an empty bot token or an empty/non-explicit origin list. Keep bot tokens and Telegram session credentials outside browser configuration.
 
 ## Authentication
 
