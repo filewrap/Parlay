@@ -1,0 +1,31 @@
+name: Temporary rooms audit verified
+'on': {workflow_dispatch: {}}
+permissions: {contents: write}
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python .github/workflows/tmp_rooms_patch_verified.py
+      - run: |
+          pip install -e '.[dev]'
+          ruff format src/parlay/rooms/service.py tests/test_rooms_service.py
+          ruff check src/parlay/rooms/service.py tests/test_rooms_service.py
+          pytest -q tests/test_rooms_service.py
+          mypy src/parlay/rooms/service.py
+      - run: |
+          git config user.name software-factory-agent
+          git config user.email software-factory-agent@users.noreply.github.com
+          git add src/parlay/rooms/service.py tests/test_rooms_service.py
+          git commit -m 'fix(rooms): enforce live authority and bounded playback'
+          git push origin main
+      - if: always()
+        run: |
+          git config user.name software-factory-agent
+          git config user.email software-factory-agent@users.noreply.github.com
+          git pull --rebase origin main || true
+          git rm -f .github/workflows/tmp-rooms-audit-verified-20260910.yml .github/workflows/tmp_rooms_patch_verified.py
+          git commit -m 'ci: remove temporary rooms audit verification' || true
+          git push origin main || true
