@@ -14,7 +14,7 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : "
 export default function RoomApp() {
   const [auth, setAuth] = useState<Auth | null>(null); const token = useRef("");
   const [roomId, setRoomId] = useState(""); const [snapshot, setSnapshot] = useState<Snapshot | null>(null); const [presence, setPresence] = useState<Presence[]>([]);
-  const [connection, setConnection] = useState<ConnectionState>("connecting"); const [error, setError] = useState(""); const [password, setPassword] = useState("");
+  const [connection, setConnection] = useState<ConnectionState>("connecting"); const [error, setError] = useState(""); const [password, setPassword] = useState(""); const [reentryRequired, setReentryRequired] = useState(false); const [reentryPending, setReentryPending] = useState(false);
   const [panel, setPanel] = useState<"queue" | "people" | "settings" | "compass" | null>("queue"); const [query, setQuery] = useState(""); const [results, setResults] = useState<Track[]>([]);
   const [recommendations, setRecommendations] = useState<Track[]>([]); const [compassEnabled, setCompassEnabled] = useState(false); const [quiet, setQuiet] = useState({ start: "22:00", end: "08:00", count: 5 });
   const [reduced, setReduced] = useState(false); const socket = useRef<WebSocket | null>(null); const reconnect = useRef<number | undefined>(undefined); const moveSent = useRef(0);
@@ -49,13 +49,15 @@ export default function RoomApp() {
       ws.onerror = () => ws.close();
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) { try { await freshAuth(); reconnect.current = window.setTimeout(() => connect(id), 100); return; } catch { setError("Telegram authentication expired. Close and relaunch the Mini App."); } }
+      else if (e instanceof ApiError && e.status === 403 && e.code === "reentry_required") { setReentryRequired(true); setError(""); }
       else setError(errorText(e));
       setConnection("offline");
     }
   }, [freshAuth]);
   useEffect(() => { if (auth && roomId) connect(roomId); }, [auth, roomId, connect]);
 
-  const join = async (event: FormEvent) => { event.preventDefault(); if (!api) return; try { setSnapshot(await api.join(roomId, password || undefined)); await connect(roomId); } catch (e) { setError(errorText(e)); } };
+  const join = async (event: FormEvent) => { event.preventDefault(); if (!api) return; try { setReentryRequired(false); setSnapshot(await api.join(roomId, password || undefined)); await connect(roomId); } catch (e) { if (e instanceof ApiError && e.status === 403 && e.code === "reentry_required") { setReentryRequired(true); setError(""); } else setError(errorText(e)); } };
+  const requestReentry = async () => { if (!api || !roomId || reentryPending) return; try { setError(""); const result = await api.requestReentry(roomId); if (result.status === "pending") { setReentryPending(true); setReentryRequired(false); } } catch (e) { setError(errorText(e)); } };
   const act = async (action: string, payload: Record<string, unknown> = {}) => {
     if (!api || !snapshot) return;
     try { setError(""); setSnapshot(await api.action(roomId, snapshot.revision, action, payload)); }
@@ -68,7 +70,7 @@ export default function RoomApp() {
   const search = async (event: FormEvent) => { event.preventDefault(); if (!api || !query.trim()) return; try { setResults((await api.search(query.trim())).tracks); } catch (e) { setError(errorText(e)); } };
   const sendMove = (position: Presence) => { const now = performance.now(); if (now - moveSent.current < 100 || socket.current?.readyState !== WebSocket.OPEN) return; moveSent.current = now; socket.current.send(JSON.stringify({ type: "move", x: position.x, z: position.z, rotation: position.rotation })); };
   const loadCompass = async () => { setPanel("compass"); if (api) try { setRecommendations((await api.compass()).recommendations); } catch (e) { setError(errorText(e)); } };
-  if (!snapshot) return <main className="safe grid min-h-[100dvh] place-items-center p-5"><section className="panel w-full max-w-md rounded-3xl p-6 text-center"><Radio className="mx-auto text-violet-300" size={40} /><h1 className="mt-4 text-2xl font-bold">Parlay</h1><p className="mt-2 text-sm text-white/60">{connection === "connecting" ? "Authenticating and loading the room…" : error || "Room access is required."}</p>{connection === "connecting" && <LoaderCircle className="mx-auto mt-5 animate-spin" />}{roomId && connection !== "connecting" && <form className="mt-5 space-y-3" onSubmit={join}><input className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3" type="password" placeholder="Room password, if required" value={password} onChange={e => setPassword(e.target.value)} /><button className="w-full rounded-xl bg-violet-500 px-4 py-3 font-semibold" type="submit">Join room</button></form>}<p className="mt-5 text-xs text-white/40">Room links identify a room. The backend still decides admission and permissions.</p></section></main>;
+  if (!snapshot) return <main className="safe grid min-h-[100dvh] place-items-center p-5"><section className="panel w-full max-w-md rounded-3xl p-6 text-center"><Radio className="mx-auto text-violet-300" size={40} /><h1 className="mt-4 text-2xl font-bold">Parlay</h1><p className="mt-2 text-sm text-white/60">{connection === "connecting" ? "Authenticating and loading the room…" : error || "Room access is required."}</p>{connection === "connecting" && <LoaderCircle className="mx-auto mt-5 animate-spin" />}{roomId && connection !== "connecting" && (reentryRequired || reentryPending ? <div className="mt-5 space-y-3"><p className="text-sm text-amber-100">{reentryPending ? "Your re-entry request is pending owner approval." : "The owner must approve your re-entry."}</p><button className="w-full rounded-xl bg-amber-400/15 px-4 py-3 font-semibold text-amber-100 disabled:opacity-60" type="button" disabled={reentryPending} onClick={requestReentry}>{reentryPending ? "Request pending" : "Request re-entry"}</button></div> : <form className="mt-5 space-y-3" onSubmit={join}><input className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3" type="password" placeholder="Room password, if required" value={password} onChange={e => setPassword(e.target.value)} /><button className="w-full rounded-xl bg-violet-500 px-4 py-3 font-semibold" type="submit">Join room</button></form>)}<p className="mt-5 text-xs text-white/40">Room links identify a room. The backend still decides admission and permissions.</p></section></main>;
 
   const position = authoritativePosition(snapshot.playback);
   return <main className="safe min-h-[100dvh] bg-[#090b12] p-3 lg:p-5">
