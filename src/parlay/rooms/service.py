@@ -389,7 +389,9 @@ class RoomService:
         if resolved is not None and action in {"queue_add", "force_play"} and self.on_action:
             event_id = f"{room_id}:{user_id}:{action_id}"
             try:
-                await self.on_action(room_id, user_id, action, self._action_track(resolved), event_id)
+                await self.on_action(
+                    room_id, user_id, action, self._action_track(resolved), event_id
+                )
             except Exception:
                 log.exception("room action callback failed", extra={"event_id": event_id})
         return output
@@ -647,26 +649,31 @@ class RoomService:
             },
         }
 
-@staticmethod
-def _action_track(track: dict[str, Any]) -> dict[str, Any]:
-candidate = track.get("youtube_id")
-valid = isinstance(candidate, str) and len(candidate) == 11 and all(
-    char.isalnum() or char in "-_" for char in candidate
-)
-if not valid:
-    parsed = urlsplit(track["source_url"])
-    candidate = (
-        parsed.path.strip("/").split("/", 1)[0]
-        if parsed.netloc.lower() in {"youtu.be", "www.youtu.be"}
-        else parse_qs(parsed.query).get("v", [""])[0]
-    )
-if not isinstance(candidate, str) or len(candidate) != 11 or not all(
-    char.isalnum() or char in "-_" for char in candidate
-):
-    raise RoomError("invalid_track", "Search returned an invalid YouTube track")
-output = dict(track)
-output["youtube_id"] = candidate
-return output
+    @staticmethod
+    def _action_track(track: dict[str, Any]) -> dict[str, Any]:
+        candidate = track.get("youtube_id")
+        valid = (
+            isinstance(candidate, str)
+            and len(candidate) == 11
+            and all(c.isalnum() or c in "-_" for c in candidate)
+        )
+        if not valid:
+            parsed = urlsplit(track["source_url"])
+            candidate = (
+                parsed.path.strip("/").split("/", 1)[0]
+                if parsed.netloc.lower() in {"youtu.be", "www.youtu.be"}
+                else parse_qs(parsed.query).get("v", [""])[0]
+            )
+        if (
+            not isinstance(candidate, str)
+            or len(candidate) != 11
+            or not all(c.isalnum() or c in "-_" for c in candidate)
+        ):
+            raise RoomError("invalid_track", "Search returned an invalid YouTube track")
+        output = dict(track)
+        output["youtube_id"] = candidate
+        return output
+
     @staticmethod
     def _clean_track(track: dict) -> dict:
         if (

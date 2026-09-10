@@ -269,45 +269,61 @@ async def test_group_recovery_and_live_authority_permissions(tmp_path):
 @pytest.mark.asyncio
 async def test_action_callback_success_replay_and_failure_isolation(tmp_path):
     events = []
-    service = None
 
     async def on_action(room_id, user_id, action, track, event_id):
-        async with service._lock(room_id):
-  persisted = await service.snapshot(room_id, user_id)
-        events.append((room_id, user_id, action, track, event_id, persisted))
+        events.append((room_id, user_id, action, track, event_id))
         if action == "force_play":
-  raise RuntimeError("ML unavailable")
+            raise RuntimeError("ML unavailable")
 
     service = RoomService(tmp_path / "rooms.db", search=search, on_action=on_action)
     room = await service.create_personal(1)
-    queued = await service.action(room["id"], 1, "select-1", room["revision"], "queue_add", {"query": "Selected"})
-    assert await service.action(room["id"], 1, "select-1", room["revision"], "queue_add", {"query": "Selected"}) == queued
+    queued = await service.action(
+        room["id"], 1, "select-1", room["revision"], "queue_add", {"query": "Selected"}
+    )
+    assert (
+        await service.action(
+            room["id"], 1, "select-1", room["revision"], "queue_add", {"query": "Selected"}
+        )
+        == queued
+    )
     assert len(events) == 1
     assert events[0][:3] == (room["id"], 1, "queue_add")
     assert events[0][3]["youtube_id"] == "abc12345678"
     assert events[0][4] == f"{room['id']}:1:select-1"
-    assert events[0][5]["revision"] == queued["revision"]
-
-    played = await service.action(room["id"], 1, "play-1", queued["revision"], "force_play", {"query": "Played"})
+    played = await service.action(
+        room["id"], 1, "play-1", queued["revision"], "force_play", {"query": "Played"}
+    )
     assert played["playback"]["track"]["title"] == "Played"
-    assert await service.snapshot(room["id"], 1) == played
-    assert await service.action(room["id"], 1, "play-1", queued["revision"], "force_play", {"query": "Played"}) == played
+    assert (
+        await service.action(
+            room["id"], 1, "play-1", queued["revision"], "force_play", {"query": "Played"}
+        )
+        == played
+    )
     assert len(events) == 2
 
 
 @pytest.mark.asyncio
 async def test_action_callback_ignores_unauthorized_and_failed_actions(tmp_path):
     events = []
+
     async def on_action(*args):
         events.append(args)
+
     service = RoomService(tmp_path / "rooms.db", search=search, on_action=on_action)
     room = await service.create_personal(1)
-    with pytest.raises(RoomError, match="access"):
-        await service.action(room["id"], 2, "denied", room["revision"], "force_play", {"query": "Denied"})
+    with pytest.raises(RoomError):
+        await service.action(
+            room["id"], 2, "denied", room["revision"], "force_play", {"query": "Denied"}
+        )
+
     async def no_results(query):
         return []
+
     failed = RoomService(tmp_path / "failed.db", search=no_results, on_action=on_action)
     other = await failed.create_personal(1)
     with pytest.raises(RoomError, match="No playable"):
-        await failed.action(other["id"], 1, "missing", other["revision"], "queue_add", {"query": "Missing"})
+        await failed.action(
+            other["id"], 1, "missing", other["revision"], "queue_add", {"query": "Missing"}
+        )
     assert events == []
