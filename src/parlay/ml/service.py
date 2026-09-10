@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import threading
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,7 +26,9 @@ class CompassService:
         self, db_path: str | Path, model_dir: str | Path, youtube_api_key: str | None = None
     ) -> None:
         self.store = CompassStore(db_path)
-        self.ranker = HybridRanker(model_dir)
+        self._model_lock = threading.RLock()
+        with self._model_lock:
+            self.ranker = HybridRanker(model_dir)
         self.collector = YouTubeChartCollector(youtube_api_key)
         self._deliver: Delivery | None = None
         self._task: asyncio.Task[None] | None = None
@@ -60,10 +63,12 @@ class CompassService:
         timezone: str = "UTC",
     ) -> None:
         user_id = self._required("user_id", user_id)
-        if isinstance(count, bool) or not 1 <= count <= 10:
+        if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 10:
             raise ValueError("count must be an integer from 1 to 10")
         for name, hour in (("quiet_start", quiet_start), ("quiet_end", quiet_end)):
-            if hour is not None and (isinstance(hour, bool) or not 0 <= hour <= 23):
+            if hour is not None and (
+                isinstance(hour, bool) or not isinstance(hour, int) or not 0 <= hour <= 23
+            ):
                 raise ValueError(f"{name} must be an integer hour from 0 to 23")
         if (quiet_start is None) != (quiet_end is None):
             raise ValueError("quiet_start and quiet_end must be set together")
@@ -83,13 +88,17 @@ class CompassService:
     ) -> None:
         track_id, title = self._required("track_id", track_id), self._required("title", title)
         if tags is not None and (
-            not isinstance(tags, list) or not all(isinstance(x, str) for x in tags)
+            not isinstance(tags, list) or not all(isinstance(value, str) for value in tags)
         ):
             raise TypeError("tags must be a list of strings")
-        source = "manual"
-        rights = "Caller-supplied metadata; the caller is responsible for source and usage rights."
         self.store.ingest_track(
-            track_id, title, artist.strip(), source_url.strip(), tags or [], source, rights
+            track_id,
+            title,
+            artist.strip(),
+            source_url.strip(),
+            tags or [],
+            "manual",
+            "Caller-supplied metadata; the caller is responsible for source and usage rights.",
         )
 
     def record_event(
@@ -116,60 +125,68 @@ class CompassService:
         )
 
     def recommend(self, user_id: str, limit: int = 10) -> list[dict[str, Any]]:
-        self._required("user_id", user_id)
-        if isinstance(limit, bool) or not 1 <= limit <= 10:
+        """Rank and expose items atomically against model lifecycle operations."""
+        user_id = self._required("user_id", user_id)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10:
             raise ValueError("limit must be an integer from 1 to 10")
-        preference = self.store.preference(user_id)
-        if not preference or not preference["enabled"] or preference["paused"]:
-            return []
-        rows = self.store.candidates(user_id)
-        if not rows:
-            return []
-        collaborative = self.ranker.collaborative_scores(user_id, [row["track_id"] for row in rows])
-        tracks, events = self.store.training_rows()
-        liked = {
-            event["track_id"]
-            for event in events
-            if event["user_id"] == user_id and event["event_type"] in POSITIVE
-        }
-        liked_tags: set[str] = set()
-        for row in tracks:
-            if row["track_id"] in liked:
-                liked_tags.update(json.loads(row["tags_json"]))
-        scored: list[tuple[float, Any, str]] = []
-        for position, row in enumerate(rows):
-            tags = set(json.loads(row["tags_json"]))
-            content = len(tags & liked_tags) / max(1, len(tags | liked_tags))
-            popularity = 1.0 / (1.0 + position)
-            if collaborative:
-                score = (
-                    0.75 * collaborative.get(row["track_id"], 0.0)
-                    + 0.2 * content
-                    + 0.05 * popularity
-                )
-                reason = "learned listening and feedback fit"
-                if content > 0:
-                    reason += ", with shared metadata tags"
-            else:
-                score = 0.8 * content + 0.2 * popularity
-                reason = (
-                    "cold-start chart fallback" if not liked_tags else "cold-start metadata fit"
-                )
-            scored.append((score, row, reason))
-        selected = sorted(scored, key=lambda value: value[0], reverse=True)[:limit]
-        output = [
-            {
-                "id": row["track_id"],
-                "title": row["title"],
-                "source_url": row["source_url"],
-                "score": float(score),
-                "reason": reason,
-                "model_version": self.ranker.version,
+        with self._model_lock:
+            preference = self.store.preference(user_id)
+            if not preference or not preference["enabled"] or preference["paused"]:
+                return []
+            rows = self.store.candidates(user_id)
+            if not rows:
+                return []
+            collaborative = self.ranker.collaborative_scores(
+                user_id, [str(row["track_id"]) for row in rows]
+            )
+            tracks, events = self.store.training_rows()
+            liked = {
+                str(event["track_id"])
+                for event in events
+                if event["user_id"] == user_id and event["event_type"] in POSITIVE
             }
-            for score, row, reason in selected
-        ]
-        self.store.add_exposures(user_id, [item["id"] for item in output], self.ranker.version)
-        return output
+            liked_tags: set[str] = set()
+            for row in tracks:
+                if row["track_id"] in liked:
+                    liked_tags.update(json.loads(row["tags_json"]))
+            scored: list[tuple[float, Any, str]] = []
+            for position, row in enumerate(rows):
+                tags = set(json.loads(row["tags_json"]))
+                content = len(tags & liked_tags) / max(1, len(tags | liked_tags))
+                popularity = 1.0 / (1.0 + position)
+                if collaborative:
+                    score = (
+                        0.75 * collaborative.get(str(row["track_id"]), 0.0)
+                        + 0.2 * content
+                        + 0.05 * popularity
+                    )
+                    reason = "learned listening and feedback fit"
+                    if content > 0:
+                        reason += ", with shared metadata tags"
+                else:
+                    score = 0.8 * content + 0.2 * popularity
+                    reason = (
+                        "cold-start chart fallback"
+                        if not liked_tags
+                        else "cold-start metadata fit"
+                    )
+                scored.append((score, row, reason))
+            selected = sorted(scored, key=lambda value: value[0], reverse=True)[:limit]
+            output = [
+                {
+                    "id": str(row["track_id"]),
+                    "title": str(row["title"]),
+                    "source_url": str(row["source_url"]),
+                    "score": float(score),
+                    "reason": reason,
+                    "model_version": self.ranker.version,
+                }
+                for score, row, reason in selected
+            ]
+            self.store.add_exposures(
+                user_id, [str(item["id"]) for item in output], self.ranker.version
+            )
+            return output
 
     def feedback(self, user_id: str, track_id: str, positive: bool, event_id: str) -> bool:
         """Record one like/dislike only when it binds to an unhandled exposure."""
@@ -182,17 +199,22 @@ class CompassService:
         )
 
     def train(self) -> dict[str, Any]:
-        """Train synchronously. Async integrations must call this in a worker thread."""
-        tracks, events = self.store.training_rows()
-        return self.ranker.train(tracks, events)
+        """Serialize snapshot, optimization, publication, and in-memory replacement."""
+        with self._model_lock:
+            tracks, events = self.store.training_rows()
+            return self.ranker.train(tracks, events)
 
     def reset_user(self, user_id: str) -> None:
-        """Clear pause/dislike state and prior exposure suppression, preserving events."""
-        self.store.reset_user(self._required("user_id", user_id))
+        """Serialize reset with recommendations while preserving learned history."""
+        with self._model_lock:
+            self.store.reset_user(self._required("user_id", user_id))
 
     def delete_user(self, user_id: str) -> None:
-        """Delete all persisted preference, event, and exposure data for one user."""
-        self.store.delete_user(self._required("user_id", user_id))
+        """Delete user data, retrain, and purge old artifacts before returning."""
+        with self._model_lock:
+            self.store.delete_user(self._required("user_id", user_id))
+            tracks, events = self.store.training_rows()
+            self.ranker.train(tracks, events)
 
     async def _scheduler(self) -> None:
         while not self._stopping.is_set():
@@ -209,13 +231,13 @@ class CompassService:
                 except Exception:
                     pass
             if self._deliver and await asyncio.to_thread(self.store.claim_job, "delivery", slot):
-                await self._deliver_hour(slot)
+                await self._deliver_hour()
             try:
                 await asyncio.wait_for(self._stopping.wait(), timeout=60.0)
             except TimeoutError:
                 continue
 
-    async def _deliver_hour(self, slot: str) -> None:
+    async def _deliver_hour(self) -> None:
         for preference in await asyncio.to_thread(self.store.enabled_users):
             if self._quiet(preference):
                 continue

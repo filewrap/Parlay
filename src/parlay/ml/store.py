@@ -111,16 +111,7 @@ class CompassStore:
                    artist=excluded.artist, source_url=excluded.source_url,
                    tags_json=excluded.tags_json, source=excluded.source,
                    rights_note=excluded.rights_note""",
-                (
-                    track_id,
-                    title,
-                    artist,
-                    source_url,
-                    json.dumps(tags),
-                    source,
-                    rights_note,
-                    time.time(),
-                ),
+                (track_id, title, artist, source_url, json.dumps(tags), source, rights_note, time.time()),
             )
 
     def record_event(
@@ -160,8 +151,7 @@ class CompassStore:
                 )
             if event_type in {"dislike", "negative"}:
                 db.execute(
-                    """INSERT INTO preferences(user_id) VALUES (?) ON CONFLICT DO NOTHING""",
-                    (user_id,),
+                    "INSERT INTO preferences(user_id) VALUES (?) ON CONFLICT DO NOTHING", (user_id,)
                 )
                 db.execute(
                     """UPDATE preferences SET dislikes_since_reset=dislikes_since_reset+1,
@@ -176,12 +166,12 @@ class CompassStore:
             return list(
                 db.execute(
                     """SELECT t.* FROM tracks t
-                   WHERE NOT EXISTS (SELECT 1 FROM exposures x
-                     WHERE x.user_id=? AND x.track_id=t.track_id)
-                   AND NOT EXISTS (SELECT 1 FROM events e
-                     WHERE e.user_id=? AND e.track_id=t.track_id
-                     AND e.event_type IN ('dislike','negative'))
-                   ORDER BY t.discovered_at DESC""",
+                       WHERE NOT EXISTS (SELECT 1 FROM exposures x
+                         WHERE x.user_id=? AND x.track_id=t.track_id)
+                       AND NOT EXISTS (SELECT 1 FROM events e
+                         WHERE e.user_id=? AND e.track_id=t.track_id
+                         AND e.event_type IN ('dislike','negative'))
+                       ORDER BY t.discovered_at DESC""",
                     (user_id, user_id),
                 )
             )
@@ -212,8 +202,7 @@ class CompassStore:
     def reset_user(self, user_id: str) -> None:
         with self.connect() as db:
             db.execute(
-                "UPDATE preferences SET dislikes_since_reset=0, paused=0 WHERE user_id=?",
-                (user_id,),
+                "UPDATE preferences SET dislikes_since_reset=0, paused=0 WHERE user_id=?", (user_id,)
             )
             db.execute("DELETE FROM exposures WHERE user_id=?", (user_id,))
 

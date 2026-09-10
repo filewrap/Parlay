@@ -1,4 +1,4 @@
-"""NumPy pairwise matrix factorization with a metadata-content ranking term."""
+"""NumPy pairwise matrix factorization with metadata-assisted ranking."""
 
 from __future__ import annotations
 
@@ -10,9 +10,11 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 POSITIVE = {"play", "listen", "like", "positive", "click"}
 NEGATIVE = {"dislike", "negative", "skip"}
+FloatArray = npt.NDArray[np.float64]
 
 
 class HybridRanker:
@@ -24,8 +26,8 @@ class HybridRanker:
         self.version = "cold-start"
         self.users: list[str] = []
         self.items: list[str] = []
-        self.user_factors = np.empty((0, dimensions))
-        self.item_factors = np.empty((0, dimensions))
+        self.user_factors: FloatArray = np.empty((0, dimensions), dtype=np.float64)
+        self.item_factors: FloatArray = np.empty((0, dimensions), dtype=np.float64)
         self._load()
 
     def _load(self) -> None:
@@ -34,31 +36,39 @@ class HybridRanker:
             return
         try:
             metadata = json.loads(pointer.read_text(encoding="utf-8"))
-            data = np.load(self.directory / metadata["artifact"], allow_pickle=False)
-            self.users = data["users"].tolist()
-            self.items = data["items"].tolist()
-            self.user_factors = data["user_factors"]
-            self.item_factors = data["item_factors"]
-            self.version = metadata["version"]
+            with np.load(self.directory / metadata["artifact"], allow_pickle=False) as data:
+                users = [str(value) for value in data["users"].tolist()]
+                items = [str(value) for value in data["items"].tolist()]
+                user_factors = np.asarray(data["user_factors"], dtype=np.float64)
+                item_factors = np.asarray(data["item_factors"], dtype=np.float64)
+            if user_factors.shape != (len(users), self.dimensions):
+                raise ValueError("invalid user factor shape")
+            if item_factors.shape != (len(items), self.dimensions):
+                raise ValueError("invalid item factor shape")
+            self.users, self.items = users, items
+            self.user_factors, self.item_factors = user_factors, item_factors
+            self.version = str(metadata["version"])
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
             return
 
     def train(self, tracks: list[Any], events: list[Any]) -> dict[str, Any]:
+        """Fit regularized BPR factors and publish one immutable snapshot."""
         started = time.perf_counter()
-        item_ids = [row["track_id"] for row in tracks]
+        item_ids = [str(row["track_id"]) for row in tracks]
         positives: dict[str, list[tuple[str, float]]] = {}
         negatives: dict[str, set[str]] = {}
         for event in events:
-            kind = event["event_type"]
+            kind = str(event["event_type"])
+            user_id = str(event["user_id"])
+            track_id = str(event["track_id"])
             if kind in POSITIVE:
-                positives.setdefault(event["user_id"], []).append(
-                    (event["track_id"], float(event["created_at"]))
-                )
+                positives.setdefault(user_id, []).append((track_id, float(event["created_at"])))
             elif kind in NEGATIVE:
-                negatives.setdefault(event["user_id"], set()).add(event["track_id"])
+                negatives.setdefault(user_id, set()).add(track_id)
+
         users = sorted(positives)
-        item_index = {item: n for n, item in enumerate(item_ids)}
-        user_index = {user: n for n, user in enumerate(users)}
+        item_index = {item: number for number, item in enumerate(item_ids)}
+        user_index = {user: number for number, user in enumerate(users)}
         rng = np.random.default_rng(42)
         user_factors = rng.normal(0, 0.08, (len(users), self.dimensions))
         item_factors = rng.normal(0, 0.08, (len(item_ids), self.dimensions))
@@ -69,12 +79,13 @@ class HybridRanker:
             if len(ordered) >= 2:
                 held_out[user] = ordered[-1][0]
                 ordered = ordered[:-1]
-            train_positive[user] = {item for item, _ in ordered}
+            train_positive[user] = {item for item, _created_at in ordered}
+
         loss = 0.0
         steps = 0
         learning_rate = 0.04
         regularization = 0.01
-        for _epoch in range(25):
+        for _epoch in range(40):
             triples: list[tuple[str, str, str]] = []
             for user, seen in train_positive.items():
                 available = [
@@ -82,8 +93,8 @@ class HybridRanker:
                 ]
                 if not seen or not available:
                     continue
-                explicit = list(negatives.get(user, set()) & set(available))
-                for positive in seen:
+                explicit = sorted(negatives.get(user, set()) & set(available))
+                for positive in sorted(seen):
                     negative = (
                         explicit[steps % len(explicit)]
                         if explicit
@@ -92,24 +103,27 @@ class HybridRanker:
                     triples.append((user, positive, negative))
             rng.shuffle(triples)
             for user, positive, negative in triples:
-                u = user_index[user]
-                i, j = item_index[positive], item_index[negative]
-                user_vector = user_factors[u].copy()
-                pos_vector = item_factors[i].copy()
-                neg_vector = item_factors[j].copy()
-                margin = float(user_vector @ (pos_vector - neg_vector))
+                user_number = user_index[user]
+                positive_number = item_index[positive]
+                negative_number = item_index[negative]
+                user_vector = user_factors[user_number].copy()
+                positive_vector = item_factors[positive_number].copy()
+                negative_vector = item_factors[negative_number].copy()
+                margin = float(user_vector @ (positive_vector - negative_vector))
                 gradient = 1.0 / (1.0 + math.exp(max(-30.0, min(30.0, margin))))
-                user_factors[u] += learning_rate * (
-                    gradient * (pos_vector - neg_vector) - regularization * user_vector
+                user_factors[user_number] += learning_rate * (
+                    gradient * (positive_vector - negative_vector)
+                    - regularization * user_vector
                 )
-                item_factors[i] += learning_rate * (
-                    gradient * user_vector - regularization * pos_vector
+                item_factors[positive_number] += learning_rate * (
+                    gradient * user_vector - regularization * positive_vector
                 )
-                item_factors[j] += learning_rate * (
-                    -gradient * user_vector - regularization * neg_vector
+                item_factors[negative_number] += learning_rate * (
+                    -gradient * user_vector - regularization * negative_vector
                 )
                 loss += math.log1p(math.exp(-margin))
                 steps += 1
+
         metrics = self._evaluate(
             users,
             item_ids,
@@ -122,7 +136,7 @@ class HybridRanker:
             tracks,
         )
         metrics.update({"training_pairs": steps, "bpr_loss": loss / max(1, steps)})
-        version = f"bpr-{int(time.time() * 1000)}"
+        version = f"bpr-{time.time_ns()}"
         self._publish(version, users, item_ids, user_factors, item_factors, metrics)
         self.users, self.items = users, item_ids
         self.user_factors, self.item_factors = user_factors, item_factors
@@ -136,10 +150,10 @@ class HybridRanker:
         self,
         users: list[str],
         items: list[str],
-        uf: np.ndarray,
-        itf: np.ndarray,
-        ui: dict[str, int],
-        ii: dict[str, int],
+        user_factors: FloatArray,
+        item_factors: FloatArray,
+        user_index: dict[str, int],
+        item_index: dict[str, int],
         seen: dict[str, set[str]],
         held_out: dict[str, str],
         tracks: list[Any],
@@ -148,13 +162,17 @@ class HybridRanker:
         ndcgs: list[float] = []
         recommendation_tags: set[str] = set()
         all_tags: set[str] = set()
-        tags = {row["track_id"]: set(json.loads(row["tags_json"])) for row in tracks}
+        tags = {str(row["track_id"]): set(json.loads(row["tags_json"])) for row in tracks}
         for values in tags.values():
             all_tags.update(values)
         for user, target in held_out.items():
             candidates = [item for item in items if item not in seen[user]]
             ranked = sorted(
-                candidates, key=lambda item: float(uf[ui[user]] @ itf[ii[item]]), reverse=True
+                candidates,
+                key=lambda item: float(
+                    user_factors[user_index[user]] @ item_factors[item_index[item]]
+                ),
+                reverse=True,
             )[:10]
             if target in ranked:
                 rank = ranked.index(target) + 1
@@ -177,35 +195,49 @@ class HybridRanker:
         version: str,
         users: list[str],
         items: list[str],
-        uf: np.ndarray,
-        itf: np.ndarray,
+        user_factors: FloatArray,
+        item_factors: FloatArray,
         metrics: dict[str, Any],
     ) -> None:
-        self.directory.mkdir(parents=True, exist_ok=True)
+        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.directory, 0o700)
         artifact = f"{version}.npz"
         temporary_artifact = self.directory / f".{artifact}.tmp"
+        final_artifact = self.directory / artifact
         with temporary_artifact.open("wb") as stream:
             np.savez_compressed(
                 stream,
                 users=np.asarray(users, dtype=str),
                 items=np.asarray(items, dtype=str),
-                user_factors=uf,
-                item_factors=itf,
+                user_factors=user_factors,
+                item_factors=item_factors,
             )
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary_artifact, self.directory / artifact)
+        os.chmod(temporary_artifact, 0o600)
+        os.replace(temporary_artifact, final_artifact)
         pointer = {"version": version, "artifact": artifact, "metrics": metrics}
         temporary_pointer = self.directory / ".current.json.tmp"
-        temporary_pointer.write_text(json.dumps(pointer, sort_keys=True), encoding="utf-8")
+        with temporary_pointer.open("w", encoding="utf-8") as stream:
+            json.dump(pointer, stream, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary_pointer, 0o600)
         os.replace(temporary_pointer, self.directory / "current.json")
+        for old_artifact in self.directory.glob("*.npz"):
+            if old_artifact != final_artifact:
+                old_artifact.unlink(missing_ok=True)
 
     def collaborative_scores(self, user_id: str, item_ids: list[str]) -> dict[str, float]:
-        if user_id not in self.users:
+        """Return a stable score snapshot from the currently published in-memory model."""
+        try:
+            user_number = self.users.index(user_id)
+        except ValueError:
             return {}
-        user = self.user_factors[self.users.index(user_id)]
+        user_vector = self.user_factors[user_number]
+        item_index = {item: number for number, item in enumerate(self.items)}
         return {
-            item: float(user @ self.item_factors[self.items.index(item)])
+            item: float(user_vector @ self.item_factors[item_index[item]])
             for item in item_ids
-            if item in self.items
+            if item in item_index
         }
