@@ -1,0 +1,25 @@
+name: Activity discovery coalescing helper
+
+'on':
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add discovery coalescing yield
+        run: python -c "from pathlib import Path; p=Path('src/parlay/activity.py'); s=p.read_text(); old='    async def _discover_dialogs(self) -> None:\\n        semaphore'; new='    async def _discover_dialogs(self) -> None:\\n        # Keep the scheduled task pending for one loop turn so concurrent unknown-call\\n        # updates coalesce onto it instead of starting back-to-back dialog scans.\\n        await asyncio.sleep(0)\\n        semaphore'; assert old in s; p.write_text(s.replace(old,new,1))"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install 'ruff>=0.6' -q
+      - run: ruff format src/parlay/activity.py tests/test_activity.py
+      - run: ruff check src/parlay/activity.py tests/test_activity.py
+      - name: Commit owned file
+        run: git config user.name 'Alex C11' && git config user.email 'alex.c992954@gmail.com' && git add src/parlay/activity.py tests/test_activity.py && git commit -m 'Coalesce concurrent activity discovery' && git push
