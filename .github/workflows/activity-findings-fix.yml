@@ -5,10 +5,10 @@ name: Activity findings fix
     branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  fix:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install -e '.[dev]' -q
-      - run: ruff format src/parlay/activity.py tests/test_activity.py
       - run: ruff check src/parlay/activity.py tests/test_activity.py
-      - name: Commit owned files if changed
-        run: git config user.name 'Alex C11' && git config user.email 'alex.c992954@gmail.com' && git add src/parlay/activity.py tests/test_activity.py && (git diff --cached --quiet || (git commit -m 'Format activity findings' && git push))
+      - run: ruff format --check src/parlay/activity.py tests/test_activity.py
+      - run: mypy src/parlay/activity.py
+      - run: pytest -q tests/test_activity.py
