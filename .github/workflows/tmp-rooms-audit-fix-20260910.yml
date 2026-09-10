@@ -11,26 +11,23 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Patch scoped files
-        run: |
-          python .github/workflows/tmp_rooms_patch.py
-      - name: Install and verify
-        run: |
+      - run: python .github/workflows/tmp_rooms_patch.py
+      - run: |
           pip install -e '.[dev]'
           ruff format src/parlay/rooms/service.py tests/test_rooms_service.py
           ruff check src/parlay/rooms/service.py tests/test_rooms_service.py
           pytest -q tests/test_rooms_service.py
           mypy src/parlay/rooms/service.py
-      - name: Commit verified files
-        run: |
-          git config user.name 'software-factory-agent'
-          git config user.email 'software-factory-agent@users.noreply.github.com'
+      - run: |
+          git config user.name software-factory-agent
+          git config user.email software-factory-agent@users.noreply.github.com
           git add src/parlay/rooms/service.py tests/test_rooms_service.py
           git commit -m 'fix(rooms): enforce live authority and bounded playback'
           git push origin main
-      - name: Remove temporary files
-        if: always()
+      - if: always()
         run: |
+          git config user.name software-factory-agent
+          git config user.email software-factory-agent@users.noreply.github.com
           git pull --rebase origin main || true
           git rm -f .github/workflows/tmp-rooms-audit-fix-20260910.yml .github/workflows/tmp_rooms_patch.py
           git commit -m 'ci: remove temporary rooms audit fix' || true
