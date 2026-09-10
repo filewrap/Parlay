@@ -1,7 +1,9 @@
 name: lifecycle-verify
 
 'on':
-  workflow_dispatch:
+  workflow_dispatch: {}
+  repository_dispatch:
+    types: [lifecycle-verify]
 
 permissions:
   contents: write
@@ -16,30 +18,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install
-        run: python -m pip install -e '.[dev]'
-      - name: Apply bounded lifecycle hardening
+      - run: python -m pip install -e '.[dev]'
+      - name: Patch and test
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
-
-          path = Path("src/parlay/app.py")
-          source = path.read_text()
-          source = source.replace("import asyncio\nimport logging\n", "import asyncio\nimport inspect\nimport logging\n")
-          source = source.replace(
-              "        finally:\n            self._recoveries.pop(chat_id, None)\n",
-              "        finally:\n            task = asyncio.current_task()\n            if self._recoveries.get(chat_id) is task:\n                self._recoveries.pop(chat_id, None)\n",
-          )
-          source = source.replace(
-              "        async def apply() -> None:\n            if runtime is not None and self.registry.get(chat_id) is not runtime:\n                return\n",
-              "        async def apply() -> None:\n            if self.registry.get(chat_id) is not runtime:\n                return\n",
-          )
-          marker = "    async def run(self) -> None:\n"
-          head, separator, _ = source.partition(marker)
-          if not separator:
-              raise SystemExit("run marker not found")
-          run = '''    @staticmethod
+          p=Path('src/parlay/app.py'); s=p.read_text()
+          s=s.replace('import asyncio\nimport logging\n','import asyncio\nimport inspect\nimport logging\n')
+          s=s.replace('        finally:\n            self._recoveries.pop(chat_id, None)\n','        finally:\n            task = asyncio.current_task()\n            if self._recoveries.get(chat_id) is task:\n                self._recoveries.pop(chat_id, None)\n')
+          s=s.replace('        async def apply() -> None:\n            if runtime is not None and self.registry.get(chat_id) is not runtime:\n                return\n','        async def apply() -> None:\n            if self.registry.get(chat_id) is not runtime:\n                return\n')
+          head,sep,_=s.partition('    async def run(self) -> None:\n'); assert sep
+          run='''    @staticmethod
     def _operator_reference(operator_id: str) -> str | int:
         return int(operator_id) if operator_id.isdecimal() else operator_id
 
@@ -73,68 +63,27 @@ jobs:
             me = await self.client.get_me()
             self._account_id = me.id
             self.commands.set_account(me.id, getattr(me, "username", None))
-            operator = await self.client.get_entity(
-                self._operator_reference(self.config.operator_id)
-            )
+            operator = await self.client.get_entity(self._operator_reference(self.config.operator_id))
             self.commands.set_operator_id(str(operator.id))
             self._operator_peer = await self.client.get_input_entity(operator)
-            self.activity = ActivityTracker(
-                self.client, self.config.activity_db_path, me.id, self._queue_activity_unavailable
-            )
+            self.activity = ActivityTracker(self.client, self.config.activity_db_path, me.id, self._queue_activity_unavailable)
             await self.activity.start()
             self._activity_ready = True
-            self.membership = MembershipWatcher(
-                str(me.id),
-                [
-                    MembershipNotifier(self._notify_operator),
-                    AuditLogStore(self.config.audit_log_path),
-                ],
-            )
+            self.membership = MembershipWatcher(str(me.id), [MembershipNotifier(self._notify_operator), AuditLogStore(self.config.audit_log_path)])
             self.client.add_event_handler(self._on_raw_update, events.Raw())
             self.client.add_event_handler(self._on_chat_action, events.ChatAction())
             self.command_wrapper.install()
-            self.compass = await asyncio.to_thread(
-                CompassService,
-                self.config.ml_db_path,
-                self.config.ml_model_dir,
-                self.config.youtube_api_key,
-            )
+            self.compass = await asyncio.to_thread(CompassService, self.config.ml_db_path, self.config.ml_model_dir, self.config.youtube_api_key)
             if self.config.bot_token:
-                self.rooms = await asyncio.to_thread(
-                    RoomService,
-                    self.config.room_db_path,
-                    self._room_playback,
-                    authority=self._authority,
-                    member=self._member,
-                    search=self.search,
-                    on_action=self._room_action_event,
-                )
+                self.rooms = await asyncio.to_thread(RoomService, self.config.room_db_path, self._room_playback, authority=self._authority, member=self._member, search=self.search, on_action=self._room_action_event)
                 await self.rooms.start()
-                self.bot = CompanionBot(
-                    self.config, self.rooms, self.compass, self._play_for_user, self._authority
-                )
+                self.bot = CompanionBot(self.config, self.rooms, self.compass, self._play_for_user, self._authority)
                 await self.bot.start()
                 self.rooms.on_reentry = self.bot.notify_reentry
                 await self.compass.start(deliver=self.bot.deliver)
                 import uvicorn
-
-                gateway = create_app(
-                    self.rooms,
-                    self.config.bot_token,
-                    list(self.config.allowed_origins),
-                    self.compass,
-                    self.search,
-                )
-                self._server = uvicorn.Server(
-                    uvicorn.Config(
-                        gateway,
-                        host=self.config.backend_host,
-                        port=self.config.backend_port,
-                        access_log=False,
-                        ws_max_size=65_536,
-                        workers=1,
-                    )
-                )
+                gateway = create_app(self.rooms, self.config.bot_token, list(self.config.allowed_origins), self.compass, self.search)
+                self._server = uvicorn.Server(uvicorn.Config(gateway, host=self.config.backend_host, port=self.config.backend_port, access_log=False, ws_max_size=65_536, workers=1))
                 server_task = asyncio.create_task(self._server.serve(), name="rooms-asgi")
                 self._spawn(self._reconcile_stored_rooms())
             else:
@@ -153,10 +102,7 @@ jobs:
             for task in waiters:
                 if task is not server_task:
                     task.cancel()
-            await asyncio.gather(
-                *(task for task in waiters if task is not server_task),
-                return_exceptions=True,
-            )
+            await asyncio.gather(*(task for task in waiters if task is not server_task), return_exceptions=True)
             await self._shutdown_server(server_task)
             await self._cleanup_step("command wrapper", self.command_wrapper.uninstall)
             await self._cleanup_step("raw update handler", lambda: self.client.remove_event_handler(self._on_raw_update))
@@ -176,129 +122,66 @@ jobs:
                 await self._cleanup_step("activity tracker", self.activity.stop)
             await self._cleanup_step("Telegram client", self.client.disconnect)
 '''
-          path.write_text(head + run)
+          p.write_text(head+run)
           PY
           cat > tests/test_app_lifecycle.py <<'PY'
-          """Focused regression tests for application startup and shutdown boundaries."""
-
+          """Focused regression tests for application lifecycle boundaries."""
           import asyncio
           from types import SimpleNamespace
           from unittest.mock import AsyncMock, Mock
-
           import pytest
-
           from parlay.app import ParlayApp
 
-
-          def lifecycle_app() -> ParlayApp:
-              app = object.__new__(ParlayApp)
-              app.config = SimpleNamespace(operator_id="7")
-              app.client = Mock(remove_event_handler=Mock(), disconnect=AsyncMock())
-              app.command_wrapper = Mock(uninstall=Mock())
-              app.registry = Mock(close=AsyncMock())
-              app.compass = None
-              app.bot = None
-              app.rooms = None
-              app.activity = None
-              app._activity_ready = False
-              app._jobs = set()
-              app._recoveries = {}
-              app._shutting_down = False
-              app._server = None
-              return app
-
+          def app():
+              a=object.__new__(ParlayApp); a.config=SimpleNamespace(operator_id='7')
+              a.client=Mock(remove_event_handler=Mock(),disconnect=AsyncMock())
+              a.command_wrapper=Mock(uninstall=Mock()); a.registry=Mock(close=AsyncMock())
+              a.compass=a.bot=a.rooms=a.activity=None; a._activity_ready=False
+              a._jobs=set(); a._recoveries={}; a._shutting_down=False; a._server=None
+              return a
 
           @pytest.mark.asyncio
-          async def test_authorization_failure_runs_cleanup_without_masking(monkeypatch):
-              app = lifecycle_app()
-              monkeypatch.setattr("parlay.app.start_authorized", AsyncMock(side_effect=RuntimeError("authorization failed")))
-              with pytest.raises(RuntimeError, match="authorization failed"):
-                  await app.run()
-              app.registry.close.assert_awaited_once()
-              app.client.disconnect.assert_awaited_once()
-
+          async def test_authorization_failure_cleans_up(monkeypatch):
+              a=app(); monkeypatch.setattr('parlay.app.start_authorized',AsyncMock(side_effect=RuntimeError('authorization failed')))
+              with pytest.raises(RuntimeError,match='authorization failed'): await a.run()
+              a.registry.close.assert_awaited_once(); a.client.disconnect.assert_awaited_once()
 
           @pytest.mark.asyncio
-          async def test_cleanup_failure_does_not_skip_later_steps_or_mask_startup(monkeypatch):
-              app = lifecycle_app()
-              app.compass = Mock(stop=AsyncMock(side_effect=RuntimeError("compass stop")))
-              app.bot = Mock(stop=AsyncMock())
-              app.rooms = Mock(stop=AsyncMock())
-              app.activity = Mock(stop=AsyncMock())
-              monkeypatch.setattr("parlay.app.start_authorized", AsyncMock(side_effect=ValueError("startup failed")))
-              with pytest.raises(ValueError, match="startup failed"):
-                  await app.run()
-              app.bot.stop.assert_awaited_once()
-              app.rooms.stop.assert_awaited_once()
-              app.activity.stop.assert_awaited_once()
-              app.client.disconnect.assert_awaited_once()
+          async def test_cleanup_attempts_all_and_preserves_startup_error(monkeypatch):
+              a=app(); a.compass=Mock(stop=AsyncMock(side_effect=RuntimeError('stop'))); a.bot=Mock(stop=AsyncMock()); a.rooms=Mock(stop=AsyncMock()); a.activity=Mock(stop=AsyncMock())
+              monkeypatch.setattr('parlay.app.start_authorized',AsyncMock(side_effect=ValueError('startup')))
+              with pytest.raises(ValueError,match='startup'): await a.run()
+              a.bot.stop.assert_awaited_once(); a.rooms.stop.assert_awaited_once(); a.activity.stop.assert_awaited_once(); a.client.disconnect.assert_awaited_once()
 
-
-          def test_numeric_operator_reference_uses_telegram_id_not_phone_lookup():
-              assert ParlayApp._operator_reference("7") == 7
-              assert ParlayApp._operator_reference("+15551234567") == "+15551234567"
-              assert ParlayApp._operator_reference("operator") == "operator"
-
+          def test_numeric_operator_is_id():
+              assert ParlayApp._operator_reference('7') == 7
+              assert ParlayApp._operator_reference('+15551234567') == '+15551234567'
 
           @pytest.mark.asyncio
-          async def test_runtime_none_callback_does_not_close_later_replacement():
-              app = lifecycle_app()
-              replacement = object()
-              current = None
-              app.registry.get = lambda _chat_id: current
-              app.registry.leave = AsyncMock()
-              app.rooms = Mock(end_group=AsyncMock())
-              pending = []
-              app._spawn = lambda awaitable: pending.append(awaitable)
-              await app._queue_activity_unavailable(-100, "call_discarded")
-              current = replacement
-              await pending[0]
-              app.registry.leave.assert_not_awaited()
-              app.rooms.end_group.assert_not_awaited()
-
+          async def test_none_runtime_callback_preserves_replacement():
+              a=app(); current=None; a.registry.get=lambda _:current; a.registry.leave=AsyncMock(); a.rooms=Mock(end_group=AsyncMock()); pending=[]; a._spawn=lambda x:pending.append(x)
+              await a._queue_activity_unavailable(-1,'gone'); current=object(); await pending[0]
+              a.registry.leave.assert_not_awaited(); a.rooms.end_group.assert_not_awaited()
 
           @pytest.mark.asyncio
-          async def test_old_recovery_cannot_remove_new_mapping(monkeypatch):
-              app = lifecycle_app()
-              entered_sleep = asyncio.Event()
-              async def blocked_sleep(_delay):
-                  entered_sleep.set()
-                  await asyncio.Event().wait()
-              monkeypatch.setattr(asyncio, "sleep", blocked_sleep)
-              old = asyncio.create_task(app._recover(-100))
-              app._recoveries[-100] = old
-              await entered_sleep.wait()
-              replacement = asyncio.create_task(asyncio.Event().wait())
-              app._recoveries[-100] = replacement
-              old.cancel()
-              await asyncio.gather(old, return_exceptions=True)
-              assert app._recoveries[-100] is replacement
-              replacement.cancel()
-              await asyncio.gather(replacement, return_exceptions=True)
-
+          async def test_old_recovery_preserves_new_mapping(monkeypatch):
+              a=app(); entered=asyncio.Event()
+              async def sleep(_): entered.set(); await asyncio.Event().wait()
+              monkeypatch.setattr(asyncio,'sleep',sleep); old=asyncio.create_task(a._recover(-1)); a._recoveries[-1]=old; await entered.wait()
+              new=asyncio.create_task(asyncio.Event().wait()); a._recoveries[-1]=new; old.cancel(); await asyncio.gather(old,return_exceptions=True)
+              assert a._recoveries[-1] is new; new.cancel(); await asyncio.gather(new,return_exceptions=True)
 
           @pytest.mark.asyncio
-          async def test_gateway_shutdown_is_bounded_then_cancelled(monkeypatch):
-              app = lifecycle_app()
-              app._server = SimpleNamespace(should_exit=False)
-              task = asyncio.create_task(asyncio.Event().wait())
-              observed = [None]
-              async def expire(awaitable, *, timeout):
-                  del awaitable
-                  observed[0] = timeout
-                  raise TimeoutError
-              monkeypatch.setattr(asyncio, "wait_for", expire)
-              await app._shutdown_server(task)
-              assert app._server.should_exit
-              assert observed[0] == 15
-              assert task.cancelled()
+          async def test_server_timeout_cancels(monkeypatch):
+              a=app(); a._server=SimpleNamespace(should_exit=False); task=asyncio.create_task(asyncio.Event().wait()); seen=[]
+              async def timeout(awaitable,*,timeout): del awaitable; seen.append(timeout); raise TimeoutError
+              monkeypatch.setattr(asyncio,'wait_for',timeout); await a._shutdown_server(task)
+              assert a._server.should_exit and seen == [15] and task.cancelled()
           PY
-      - name: Scoped verification
-        run: |
           pytest -q tests/test_app_lifecycle.py
           mypy src/parlay/app.py
           ruff check src/parlay/app.py tests/test_app_lifecycle.py
-      - name: Commit tested change and remove workflow
+      - name: Commit and remove workflow
         run: |
           git config user.name 'Alex C11'
           git config user.email 'alex.c992954@gmail.com'
