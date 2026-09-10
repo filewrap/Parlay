@@ -121,7 +121,7 @@ async def test_duration_override_expires_on_background_sweep(tmp_path):
 @pytest.mark.asyncio
 async def test_moderator_cannot_kick_another_moderator(tmp_path):
     service = RoomService(tmp_path / "rooms.db")
-    room = await service.create_personal(1, 2, 3)
+    room = await service.create_personal(1, 2, 3, capacity=3)
     room = await service.join(room["id"], user(2))
     room = await service.join(room["id"], user(3))
     room = await service.action(
