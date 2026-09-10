@@ -1,7 +1,7 @@
 name: Activity format helper
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 permissions:
   contents: write
