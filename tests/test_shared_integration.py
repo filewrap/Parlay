@@ -180,14 +180,14 @@ async def test_two_actor_gateway_room_runtime_and_compass_integration(
         original_view = (await client.get(f"/api/rooms/{room['id']}", headers=original)).json()
         assert original_view["owner_id"] == ORIGINAL_OWNER
         assert original_view["permissions"]["control"] is False
-        joined = await client.post(
-            f"/api/rooms/{room['id']}/join", json={}, headers=current_owner
-        )
+        joined = await client.post(f"/api/rooms/{room['id']}/join", json={}, headers=current_owner)
         assert joined.status_code == 200
         current_view = joined.json()
         assert current_view["permissions"]["control"] is True
 
-        searched = await client.get("/api/search", params={"q": "Shared song"}, headers=current_owner)
+        searched = await client.get(
+            "/api/search", params={"q": "Shared song"}, headers=current_owner
+        )
         assert searched.status_code == 200
         assert searched.json()["tracks"] == [
             {
