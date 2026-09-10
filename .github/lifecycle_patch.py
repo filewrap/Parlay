@@ -1,0 +1,208 @@
+from pathlib import Path
+
+p = Path("src/parlay/app.py")
+s = p.read_text()
+s = s.replace("import asyncio\nimport logging\n", "import asyncio\nimport inspect\nimport logging\n")
+s = s.replace(
+    "        finally:\n            self._recoveries.pop(chat_id, None)\n",
+    "        finally:\n            task = asyncio.current_task()\n            if self._recoveries.get(chat_id) is task:\n                self._recoveries.pop(chat_id, None)\n",
+)
+s = s.replace(
+    "        async def apply() -> None:\n            if runtime is not None and self.registry.get(chat_id) is not runtime:\n                return\n",
+    "        async def apply() -> None:\n            if self.registry.get(chat_id) is not runtime:\n                return\n",
+)
+head, sep, _ = s.partition("    async def run(self) -> None:\n")
+assert sep
+run = '''    @staticmethod
+    def _operator_reference(operator_id: str) -> str | int:
+        return int(operator_id) if operator_id.isdecimal() else operator_id
+
+    async def _cleanup_step(self, name: str, action: Any) -> None:
+        try:
+            result = action()
+            if inspect.isawaitable(result):
+                await result
+        except BaseException:
+            log.exception("Cleanup step failed: %s", name)
+
+    async def _shutdown_server(self, server_task: asyncio.Task[Any] | None) -> None:
+        if self._server is not None:
+            self._server.should_exit = True
+        if server_task is None:
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(server_task), timeout=15)
+        except TimeoutError:
+            log.warning("Room gateway did not stop within 15 seconds; cancelling it")
+            server_task.cancel()
+            await asyncio.gather(server_task, return_exceptions=True)
+        except BaseException:
+            log.exception("Room gateway shutdown failed")
+
+    async def run(self) -> None:
+        server_task: asyncio.Task[Any] | None = None
+        waiters: list[asyncio.Task[Any]] = []
+        try:
+            await start_authorized(self.client)
+            me = await self.client.get_me()
+            self._account_id = me.id
+            self.commands.set_account(me.id, getattr(me, "username", None))
+            operator = await self.client.get_entity(self._operator_reference(self.config.operator_id))
+            self.commands.set_operator_id(str(operator.id))
+            self._operator_peer = await self.client.get_input_entity(operator)
+            self.activity = ActivityTracker(self.client, self.config.activity_db_path, me.id, self._queue_activity_unavailable)
+            await self.activity.start()
+            self._activity_ready = True
+            self.membership = MembershipWatcher(str(me.id), [MembershipNotifier(self._notify_operator), AuditLogStore(self.config.audit_log_path)])
+            self.client.add_event_handler(self._on_raw_update, events.Raw())
+            self.client.add_event_handler(self._on_chat_action, events.ChatAction())
+            self.command_wrapper.install()
+            self.compass = await asyncio.to_thread(CompassService, self.config.ml_db_path, self.config.ml_model_dir, self.config.youtube_api_key)
+            if self.config.bot_token:
+                self.rooms = await asyncio.to_thread(RoomService, self.config.room_db_path, self._room_playback, authority=self._authority, member=self._member, search=self.search, on_action=self._room_action_event)
+                await self.rooms.start()
+                self.bot = CompanionBot(self.config, self.rooms, self.compass, self._play_for_user, self._authority)
+                await self.bot.start()
+                self.rooms.on_reentry = self.bot.notify_reentry
+                await self.compass.start(deliver=self.bot.deliver)
+                import uvicorn
+                gateway = create_app(self.rooms, self.config.bot_token, list(self.config.allowed_origins), self.compass, self.search)
+                self._server = uvicorn.Server(uvicorn.Config(gateway, host=self.config.backend_host, port=self.config.backend_port, access_log=False, ws_max_size=65_536, workers=1))
+                server_task = asyncio.create_task(self._server.serve(), name="rooms-asgi")
+                self._spawn(self._reconcile_stored_rooms())
+            else:
+                log.warning("BOT_TOKEN is absent: companion bot and room gateway are disabled")
+                await self.compass.start()
+            waiters.append(asyncio.create_task(self.client.run_until_disconnected()))
+            if server_task is not None:
+                waiters.append(server_task)
+            if self.bot is not None and self.bot.client is not None:
+                waiters.append(asyncio.create_task(self.bot.client.run_until_disconnected()))
+            done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
+        finally:
+            self._shutting_down = True
+            for task in waiters:
+                if task is not server_task:
+                    task.cancel()
+            await asyncio.gather(*(task for task in waiters if task is not server_task), return_exceptions=True)
+            await self._shutdown_server(server_task)
+            await self._cleanup_step("command wrapper", self.command_wrapper.uninstall)
+            await self._cleanup_step("raw update handler", lambda: self.client.remove_event_handler(self._on_raw_update))
+            await self._cleanup_step("chat action handler", lambda: self.client.remove_event_handler(self._on_chat_action))
+            for task in tuple(self._jobs):
+                task.cancel()
+            await asyncio.gather(*tuple(self._jobs), return_exceptions=True)
+            await self._cleanup_step("runtime registry", self.registry.close)
+            if self.compass is not None:
+                await self._cleanup_step("Compass", self.compass.stop)
+            if self.bot is not None:
+                await self._cleanup_step("companion bot", self.bot.stop)
+            if self.rooms is not None:
+                await self._cleanup_step("room service", self.rooms.stop)
+            self._activity_ready = False
+            if self.activity is not None:
+                await self._cleanup_step("activity tracker", self.activity.stop)
+            await self._cleanup_step("Telegram client", self.client.disconnect)
+'''
+p.write_text(head + run)
+Path("tests/test_app_lifecycle.py").write_text('''"""Focused regression tests for application lifecycle boundaries."""
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+import pytest
+from parlay.app import ParlayApp
+
+def app():
+    a = object.__new__(ParlayApp)
+    a.config = SimpleNamespace(operator_id="7")
+    a.client = Mock(remove_event_handler=Mock(), disconnect=AsyncMock())
+    a.command_wrapper = Mock(uninstall=Mock())
+    a.registry = Mock(close=AsyncMock())
+    a.compass = a.bot = a.rooms = a.activity = None
+    a._activity_ready = False
+    a._jobs = set()
+    a._recoveries = {}
+    a._shutting_down = False
+    a._server = None
+    return a
+
+@pytest.mark.asyncio
+async def test_authorization_failure_cleans_up(monkeypatch):
+    a = app()
+    monkeypatch.setattr("parlay.app.start_authorized", AsyncMock(side_effect=RuntimeError("authorization failed")))
+    with pytest.raises(RuntimeError, match="authorization failed"):
+        await a.run()
+    a.registry.close.assert_awaited_once()
+    a.client.disconnect.assert_awaited_once()
+
+@pytest.mark.asyncio
+async def test_cleanup_attempts_all_and_preserves_startup_error(monkeypatch):
+    a = app()
+    a.compass = Mock(stop=AsyncMock(side_effect=RuntimeError("stop")))
+    a.bot = Mock(stop=AsyncMock())
+    a.rooms = Mock(stop=AsyncMock())
+    a.activity = Mock(stop=AsyncMock())
+    monkeypatch.setattr("parlay.app.start_authorized", AsyncMock(side_effect=ValueError("startup")))
+    with pytest.raises(ValueError, match="startup"):
+        await a.run()
+    a.bot.stop.assert_awaited_once()
+    a.rooms.stop.assert_awaited_once()
+    a.activity.stop.assert_awaited_once()
+    a.client.disconnect.assert_awaited_once()
+
+def test_numeric_operator_is_id():
+    assert ParlayApp._operator_reference("7") == 7
+    assert ParlayApp._operator_reference("+15551234567") == "+15551234567"
+
+@pytest.mark.asyncio
+async def test_none_runtime_callback_preserves_replacement():
+    a = app()
+    current = None
+    a.registry.get = lambda _: current
+    a.registry.leave = AsyncMock()
+    a.rooms = Mock(end_group=AsyncMock())
+    pending = []
+    a._spawn = lambda item: pending.append(item)
+    await a._queue_activity_unavailable(-1, "gone")
+    current = object()
+    await pending[0]
+    a.registry.leave.assert_not_awaited()
+    a.rooms.end_group.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_old_recovery_preserves_new_mapping(monkeypatch):
+    a = app()
+    entered = asyncio.Event()
+    async def sleep(_):
+        entered.set()
+        await asyncio.Event().wait()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    old = asyncio.create_task(a._recover(-1))
+    a._recoveries[-1] = old
+    await entered.wait()
+    new = asyncio.create_task(asyncio.Event().wait())
+    a._recoveries[-1] = new
+    old.cancel()
+    await asyncio.gather(old, return_exceptions=True)
+    assert a._recoveries[-1] is new
+    new.cancel()
+    await asyncio.gather(new, return_exceptions=True)
+
+@pytest.mark.asyncio
+async def test_server_timeout_cancels(monkeypatch):
+    a = app()
+    a._server = SimpleNamespace(should_exit=False)
+    task = asyncio.create_task(asyncio.Event().wait())
+    seen = []
+    async def timeout(awaitable, *, timeout):
+        del awaitable
+        seen.append(timeout)
+        raise TimeoutError
+    monkeypatch.setattr(asyncio, "wait_for", timeout)
+    await a._shutdown_server(task)
+    assert a._server.should_exit
+    assert seen == [15]
+    assert task.cancelled()
+''')
