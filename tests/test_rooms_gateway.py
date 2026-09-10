@@ -84,6 +84,14 @@ async def receive_type(connection: ClientConnection, kind: str) -> dict[str, Any
 
 def test_official_init_data_signature_and_time_checks() -> None:
     assert validate_init_data(signed(), TOKEN)["user"]["id"] == 1
+    modern = signed(extra={"signature": "modern-ed25519-signature"})
+    assert validate_init_data(modern, TOKEN)["user"]["id"] == 1
+    with pytest.raises(ValueError, match="signature"):
+        validate_init_data(modern.replace("modern-ed25519-signature", "tampered"), TOKEN)
+    with pytest.raises(ValueError, match="duplicate"):
+        validate_init_data(modern + "&signature=other", TOKEN)
+    with pytest.raises(ValueError, match="Telegram user"):
+        validate_init_data(signed(extra={"user": "[]"}), TOKEN)
     with pytest.raises(ValueError, match="signature"):
         validate_init_data(signed().replace("U1", "bad"), TOKEN)
     with pytest.raises(ValueError, match="expired"):
@@ -156,13 +164,19 @@ async def test_http_bounds_replay_compass_identity_and_pending_reentry(tmp_path:
             headers=second,
             json={
                 "action_id": "reentry-2",
-                "expected_revision": kicked.json()["revision"],
+                "expected_revision": 0,
                 "action": "request_reentry",
                 "payload": {},
             },
         )
         assert request.status_code == 200
-        assert request.json()["pending_reentry"] == []
+        assert request.json() == {"status": "pending"}
+        denied = await client.get(f"/api/rooms/{room['id']}", headers=second)
+        assert denied.status_code == 403
+        denied_ticket = await client.post(
+            "/api/ws-ticket", json={"room_id": room["id"]}, headers=second
+        )
+        assert denied_ticket.status_code == 403
         owner_view = (await client.get(f"/api/rooms/{room['id']}", headers=owner)).json()
         assert owner_view["pending_reentry"] == [2]
 

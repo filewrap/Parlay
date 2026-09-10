@@ -298,11 +298,14 @@ class RoomService:
             self._active(row)
             data = self._data(row)
             member = next((m for m in data["members"] if m["user_id"] == user_id), None)
-            if action == "request_reentry" and user_id in data["kicked"] and not member:
+            reentry_request = (
+                action == "request_reentry" and user_id in data["kicked"] and member is None
+            )
+            if reentry_request:
                 member = {"user_id": user_id, "role": "participant"}
-            if not member or (user_id in data["kicked"] and action != "request_reentry"):
+            if not member or (user_id in data["kicked"] and not reentry_request):
                 raise RoomError("access_revoked", "Room access is not active", 403)
-            if row["revision"] != expected_revision:
+            if not reentry_request and row["revision"] != expected_revision:
                 raise RoomError(
                     "stale_revision",
                     "Room state changed. Refresh and retry.",
@@ -314,7 +317,12 @@ class RoomService:
             )
             revision = row["revision"] + (1 if changed else 0)
             new_row = self._replace(row, revision, data)
-            output = self._snapshot(new_row, user_id)
+            if reentry_request:
+                output = {"status": "pending"}
+                publication = self._snapshot(new_row, row["owner_id"])
+            else:
+                output = self._snapshot(new_row, user_id)
+                publication = output
             await asyncio.to_thread(
                 self._commit_action,
                 room_id,
@@ -335,7 +343,7 @@ class RoomService:
             reentry_result = self.on_reentry(*notify)
             if inspect.isawaitable(reentry_result):
                 await reentry_result
-        self._publish(room_id, output)
+        self._publish(room_id, publication)
         return output
 
     async def _apply(self, row, data, actor, action, payload, resolved):

@@ -49,7 +49,6 @@ def validate_init_data(init_data: str, bot_token: str, now: float | None = None)
         raise ValueError("duplicate initData field")
     values = dict(pairs)
     supplied = values.pop("hash", None)
-    values.pop("signature", None)
     if supplied is None or len(supplied) != 64:
         raise ValueError("missing initData hash")
     data_check = "\n".join(f"{key}={value}" for key, value in sorted(values.items()))

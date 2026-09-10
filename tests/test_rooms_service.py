@@ -39,24 +39,28 @@ async def test_capacity_password_kick_reentry_and_replay(tmp_path):
     room = await service.action(room["id"], 1, "kick", room["revision"], "kick", {"user_id": 2})
     with pytest.raises(RoomError, match="approve"):
         await service.join(room["id"], user(2), "secret")
-    room = await service.action(room["id"], 2, "request", room["revision"], "request_reentry", {})
-    assert notices and room["pending_reentry"] == []
-    owner = await service.snapshot(room["id"], 1)
+    room_id = room["id"]
+    room = await service.action(room_id, 2, "request", 0, "request_reentry", {})
+    assert notices and room == {"status": "pending"}
+    assert await service.action(room_id, 2, "request", 0, "request_reentry", {}) == room
+    with pytest.raises(RoomError, match="access"):
+        await service.snapshot(room_id, 2)
+    owner = await service.snapshot(room_id, 1)
     owner = await service.action(
-        room["id"], 1, "approve", owner["revision"], "approve_reentry", {"user_id": 2}
+        room_id, 1, "approve", owner["revision"], "approve_reentry", {"user_id": 2}
     )
-    joined = await service.join(room["id"], user(2), "secret")
-    owner = await service.snapshot(room["id"], 1)
+    joined = await service.join(room_id, user(2), "secret")
+    owner = await service.snapshot(room_id, 1)
     played = await service.action(
-        room["id"], 1, "play", owner["revision"], "force_play", {"query": "Hello"}
+        room_id, 1, "play", owner["revision"], "force_play", {"query": "Hello"}
     )
     replay = await service.action(
-        room["id"], 1, "play", owner["revision"], "force_play", {"query": "Hello"}
+        room_id, 1, "play", owner["revision"], "force_play", {"query": "Hello"}
     )
-    assert replay == played and joined["id"] == room["id"]
+    assert replay == played and joined["id"] == room_id
     with pytest.raises(RoomError, match="already used"):
         await service.action(
-            room["id"], 1, "play", owner["revision"], "force_play", {"query": "Other"}
+            room_id, 1, "play", owner["revision"], "force_play", {"query": "Other"}
         )
 
 
