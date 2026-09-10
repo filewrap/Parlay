@@ -17,29 +17,27 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -q -e '.[dev]'
-      - name: Finalize scoped delivery typing
+      - name: Apply structural delivery typing patch
         run: |
           python - <<'PY'
           from pathlib import Path
 
           path = Path('src/parlay/ml/service.py')
-          text = path.read_text()
-          old = '''            if self._deliver and await asyncio.to_thread(
-                lambda: self.store.claim_job("delivery", slot)
-            ):
-                await self._deliver_hour()
-          '''
-          new = '''            deliver = self._deliver
-            if deliver is not None:
-                delivery_claimed = await asyncio.to_thread(
-                    self.store.claim_job, "delivery", slot
-                )
-                if delivery_claimed:
-                    await self._deliver_hour(deliver)
-          '''
-          if old not in text:
-              raise SystemExit('typed delivery block not found')
-          text = text.replace(old, new, 1)
+          lines = path.read_text().splitlines()
+          start = next(i for i, line in enumerate(lines) if 'if self._deliver and await asyncio.to_thread(' in line)
+          end = next(i for i in range(start, len(lines)) if 'await self._deliver_hour()' in lines[i])
+          indent = lines[start][:len(lines[start]) - len(lines[start].lstrip())]
+          replacement = [
+              f'{indent}deliver = self._deliver',
+              f'{indent}if deliver is not None:',
+              f'{indent}    delivery_claimed = await asyncio.to_thread(',
+              f'{indent}        self.store.claim_job, "delivery", slot',
+              f'{indent}    )',
+              f'{indent}    if delivery_claimed:',
+              f'{indent}        await self._deliver_hour(deliver)',
+          ]
+          lines[start:end + 1] = replacement
+          text = '\n'.join(lines) + '\n'
           text = text.replace(
               '    async def _deliver_hour(self) -> None:\n',
               '    async def _deliver_hour(self, deliver: Delivery) -> None:\n',
