@@ -398,7 +398,9 @@ class ActivityTracker:
         except asyncio.CancelledError:
             raise
         except Exception:
-            log.warning("self participant reconciliation failed for chat %s", chat_id, exc_info=True)
+            log.warning(
+                "self participant reconciliation failed for chat %s", chat_id, exc_info=True
+            )
             await self._save(chat_id, call_state="unknown", membership="unknown")
             return
         own = next((item for item in result.participants if self._is_self(item)), None)
@@ -489,9 +491,7 @@ class ActivityTracker:
         )
         await self._notify_once(chat_id, "membership_removed", previous)
 
-    async def _notify_once(
-        self, chat_id: int, reason: str, previous: _Activity | None
-    ) -> None:
+    async def _notify_once(self, chat_id: int, reason: str, previous: _Activity | None) -> None:
         if previous is not None and previous.unavailable_reason == reason:
             return
         try:
@@ -589,9 +589,7 @@ class ActivityTracker:
         elif isinstance(entity, types.Chat):
             result = await self._client(functions.messages.GetFullChatRequest(entity.id))
         elif isinstance(entity, types.InputPeerChat):
-            result = await self._client(
-                functions.messages.GetFullChatRequest(entity.chat_id)
-            )
+            result = await self._client(functions.messages.GetFullChatRequest(entity.chat_id))
         else:
             input_entity = await self._client.get_input_entity(entity)
             return await self._get_active_call(input_entity)

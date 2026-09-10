@@ -62,9 +62,7 @@ class FakeClient:
     async def __call__(self, request: object) -> object:
         self.requests.append(request)
         if isinstance(request, functions.messages.GetFullChatRequest):
-            return SimpleNamespace(
-                full_chat=SimpleNamespace(call=self.calls.get(request.chat_id))
-            )
+            return SimpleNamespace(full_chat=SimpleNamespace(call=self.calls.get(request.chat_id)))
         if isinstance(request, functions.channels.GetFullChannelRequest):
             channel_id = int(getattr(request.channel, "channel_id", request.channel.id))
             return SimpleNamespace(full_chat=SimpleNamespace(call=self.calls.get(channel_id)))
@@ -228,8 +226,7 @@ async def test_rpc_failure_marks_unknown_without_false_leave(tmp_path) -> None:
     await tracker.start()
     try:
         assert await tracker.status_text(chat_id) == (
-            "Voice chat state unknown; account participation unknown; "
-            "media transport disconnected."
+            "Voice chat state unknown; account participation unknown; media transport disconnected."
         )
         assert seen == []
     finally:
