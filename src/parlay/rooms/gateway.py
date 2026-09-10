@@ -12,7 +12,7 @@ import secrets
 import sqlite3
 import time
 from collections import defaultdict, deque
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, TypeVar, cast
 from urllib.parse import parse_qsl, urlsplit
@@ -161,7 +161,10 @@ class BodyLimitMiddleware:
             {
                 "type": "http.response.start",
                 "status": 413,
-                "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())],
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
             }
         )
         await send({"type": "http.response.body", "body": body})
@@ -277,9 +280,7 @@ class GatewayState:
             if not valid:
                 db.rollback()
                 return None
-            db.execute(
-                "UPDATE room_ws_tickets SET used_at=? WHERE ticket_hash=?", (now, digest)
-            )
+            db.execute("UPDATE room_ws_tickets SET used_at=? WHERE ticket_hash=?", (now, digest))
             db.commit()
         assert row is not None
         user = json.loads(row["user_json"])
@@ -381,9 +382,7 @@ def create_app(
         return await service.join(room_id, user, body.password)
 
     @app.get("/api/rooms/{room_id}")
-    async def snapshot(
-        room_id: str, auth_data: Identity = Depends(identity)
-    ) -> dict[str, Any]:
+    async def snapshot(room_id: str, auth_data: Identity = Depends(identity)) -> dict[str, Any]:
         return await service.snapshot(room_id, int(auth_data[1]["id"]))
 
     @app.post("/api/rooms/{room_id}/actions")
@@ -413,9 +412,7 @@ def create_app(
         return {"tracks": [service._clean_track(track) for track in tracks[:25]]}
 
     @app.post("/api/ws-ticket")
-    async def ticket(
-        body: TicketBody, auth_data: Identity = Depends(identity)
-    ) -> dict[str, str]:
+    async def ticket(body: TicketBody, auth_data: Identity = Depends(identity)) -> dict[str, str]:
         token_hash, user, expiry = auth_data
         await service.snapshot(body.room_id, int(user["id"]))
         value = secrets.token_urlsafe(32)
@@ -587,9 +584,7 @@ def _accept_movement(
         return
     values = [message.get(key) for key in ("x", "z", "rotation")]
     if not all(
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
+        isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
         for value in values
     ):
         return

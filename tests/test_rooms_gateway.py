@@ -48,9 +48,7 @@ async def running_app(app: Any) -> AsyncIterator[tuple[str, str]]:
     listener.bind(("127.0.0.1", 0))
     listener.listen()
     port = listener.getsockname()[1]
-    server = uvicorn.Server(
-        uvicorn.Config(app, log_level="error", lifespan="off", ws="websockets")
-    )
+    server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="off", ws="websockets"))
     task = asyncio.create_task(server.serve(sockets=[listener]))
     for _ in range(100):
         if server.started:
@@ -112,9 +110,10 @@ async def test_http_bounds_replay_compass_identity_and_pending_reentry(tmp_path:
     service = RoomService(tmp_path / "rooms.db", search=search)
     room = await service.create_personal(1, 2)
     app = create_app(service, TOKEN, [ORIGIN], compass=Compass(), search=search)
-    async with running_app(app) as (http_url, _), httpx.AsyncClient(
-        base_url=http_url, headers={"Origin": ORIGIN}
-    ) as client:
+    async with (
+        running_app(app) as (http_url, _),
+        httpx.AsyncClient(base_url=http_url, headers={"Origin": ORIGIN}) as client,
+    ):
         owner = await authenticate(client, 1)
         second = await authenticate(client, 2)
         joined_response = await client.post(
@@ -174,27 +173,35 @@ async def test_real_two_client_cross_updates_movement_kick_and_ticket_replay(tmp
     room = await service.create_personal(1, 2)
     await service.join(room["id"], {"id": 2, "first_name": "U2"})
     app = create_app(service, TOKEN, [ORIGIN])
-    async with running_app(app) as (http_url, ws_url), httpx.AsyncClient(
-        base_url=http_url, headers={"Origin": ORIGIN}
-    ) as client:
+    async with (
+        running_app(app) as (http_url, ws_url),
+        httpx.AsyncClient(base_url=http_url, headers={"Origin": ORIGIN}) as client,
+    ):
         owner = await authenticate(client, 1)
         second = await authenticate(client, 2)
         first_ticket = await ticket(client, owner, room["id"])
         second_ticket = await ticket(client, second, room["id"])
-        async with websockets.connect(
-            f"{ws_url}/api/rooms/{room['id']}/ws?ticket={first_ticket}", origin=ORIGIN
-        ) as first_ws, websockets.connect(
-            f"{ws_url}/api/rooms/{room['id']}/ws?ticket={second_ticket}", origin=ORIGIN
-        ) as second_ws:
+        async with (
+            websockets.connect(
+                f"{ws_url}/api/rooms/{room['id']}/ws?ticket={first_ticket}", origin=ORIGIN
+            ) as first_ws,
+            websockets.connect(
+                f"{ws_url}/api/rooms/{room['id']}/ws?ticket={second_ticket}", origin=ORIGIN
+            ) as second_ws,
+        ):
             await receive_type(first_ws, "snapshot")
             await receive_type(second_ws, "snapshot")
             presence = await receive_type(first_ws, "presence")
             assert {item["user_id"] for item in presence["players"]} == {1, 2}
             await asyncio.sleep(0.11)
-            await second_ws.send(json.dumps({"type": "move", "x": 1, "z": 0, "rotation": 0, "seq": 1}))
+            await second_ws.send(
+                json.dumps({"type": "move", "x": 1, "z": 0, "rotation": 0, "seq": 1})
+            )
             moved = await receive_type(first_ws, "presence")
             assert next(item for item in moved["players"] if item["user_id"] == 2)["x"] == 1
-            await second_ws.send(json.dumps({"type": "move", "x": float("inf"), "z": 0, "rotation": 0}))
+            await second_ws.send(
+                json.dumps({"type": "move", "x": float("inf"), "z": 0, "rotation": 0})
+            )
             current = (await client.get(f"/api/rooms/{room['id']}", headers=owner)).json()
             update = await client.post(
                 f"/api/rooms/{room['id']}/actions",
@@ -208,7 +215,12 @@ async def test_real_two_client_cross_updates_movement_kick_and_ticket_replay(tmp
             )
             assert update.status_code == 200
             cross_update = await receive_type(second_ws, "snapshot")
-            assert next(item for item in cross_update["snapshot"]["members"] if item["user_id"] == 1)["avatar"] == "fox"
+            assert (
+                next(item for item in cross_update["snapshot"]["members"] if item["user_id"] == 1)[
+                    "avatar"
+                ]
+                == "fox"
+            )
             current = update.json()
             kicked = await client.post(
                 f"/api/rooms/{room['id']}/actions",
@@ -236,9 +248,10 @@ async def test_websocket_session_expiry_disconnects_receiver(tmp_path: Any) -> N
     service = RoomService(tmp_path / "rooms.db")
     room = await service.create_personal(1)
     app = create_app(service, TOKEN, [ORIGIN])
-    async with running_app(app) as (http_url, ws_url), httpx.AsyncClient(
-        base_url=http_url, headers={"Origin": ORIGIN}
-    ) as client:
+    async with (
+        running_app(app) as (http_url, ws_url),
+        httpx.AsyncClient(base_url=http_url, headers={"Origin": ORIGIN}) as client,
+    ):
         owner = await authenticate(client, 1)
         ws_ticket = await ticket(client, owner, room["id"])
         async with websockets.connect(

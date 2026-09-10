@@ -109,13 +109,25 @@ class RoomService:
         data = self._new_data(owner_id)
         if invited_id is not None:
             data["invited"] = [int(invited_id)]
-        row = (room_id, "personal", owner_id, None, None, now, now + duration, 1, "active", None,
-               json.dumps(data, separators=(",", ":")))
+        row = (
+            room_id,
+            "personal",
+            owner_id,
+            None,
+            None,
+            now,
+            now + duration,
+            1,
+            "active",
+            None,
+            json.dumps(data, separators=(",", ":")),
+        )
         await asyncio.to_thread(self._insert_room, row)
         return await self.snapshot(room_id, owner_id)
 
     async def ensure_group(self, chat_id: int, call_id: int, owner_id: int) -> dict:
         """Internal bot integration only. The HTTP gateway never exposes this operation."""
+
         def ensure() -> str:
             with self._connect() as db:
                 found = db.execute(
@@ -134,10 +146,22 @@ class RoomService:
                 data["settings"]["capacity"] = 15
                 db.execute(
                     "INSERT INTO rooms VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                    (room_id, "group", owner_id, chat_id, call_id, time.time(), None, 1,
-                     "active", None, json.dumps(data, separators=(",", ":"))),
+                    (
+                        room_id,
+                        "group",
+                        owner_id,
+                        chat_id,
+                        call_id,
+                        time.time(),
+                        None,
+                        1,
+                        "active",
+                        None,
+                        json.dumps(data, separators=(",", ":")),
+                    ),
                 )
                 return room_id
+
         room_id = await asyncio.to_thread(ensure)
         result = await self.snapshot(room_id, owner_id)
         self._publish(room_id, result)
@@ -147,13 +171,15 @@ class RoomService:
         def end() -> list[str]:
             with self._connect() as db:
                 rows = db.execute(
-                    "SELECT id FROM rooms WHERE chat_id=? AND kind='group' AND state!='ended'", (chat_id,)
+                    "SELECT id FROM rooms WHERE chat_id=? AND kind='group' AND state!='ended'",
+                    (chat_id,),
                 ).fetchall()
                 db.execute(
                     "UPDATE rooms SET state='ended',end_reason=?,revision=revision+1 WHERE chat_id=? AND kind='group' AND state!='ended'",
                     (str(reason)[:200], chat_id),
                 )
                 return [str(row["id"]) for row in rows]
+
         for room_id in await asyncio.to_thread(end):
             row = await asyncio.to_thread(self._load, room_id)
             self._publish(room_id, self._snapshot(row, None))
@@ -176,22 +202,32 @@ class RoomService:
             row = await asyncio.to_thread(self._load, room_id)
             self._active(row)
             data = self._data(row)
-            if row["kind"] == "group" and not await self._check(self.member, user_id, row["chat_id"]):
+            if row["kind"] == "group" and not await self._check(
+                self.member, user_id, row["chat_id"]
+            ):
                 raise RoomError("not_group_member", "Telegram group membership is required", 403)
             members = data["members"]
             existing = next((m for m in members if m["user_id"] == user_id), None)
             if user_id in data["kicked"]:
                 raise RoomError("reentry_required", "The owner must approve re-entry", 403)
             if not existing:
-                if row["kind"] == "personal" and data.get("invited") and user_id not in data["invited"]:
+                if (
+                    row["kind"] == "personal"
+                    and data.get("invited")
+                    and user_id not in data["invited"]
+                ):
                     raise RoomError("not_invited", "This personal room is invite-only", 403)
                 if len(members) >= data["settings"]["capacity"]:
                     raise RoomError("room_full", "The room is at capacity", 409)
-                if data["password_hash"] and not self._verify_password(password, data["password_hash"]):
+                if data["password_hash"] and not self._verify_password(
+                    password, data["password_hash"]
+                ):
                     raise RoomError("wrong_password", "The room password is incorrect", 403)
                 members.append(self._member(user, "participant"))
             else:
-                existing.update({k: v for k, v in self._member(user, existing["role"]).items() if v is not None})
+                existing.update(
+                    {k: v for k, v in self._member(user, existing["role"]).items() if v is not None}
+                )
             revision = row["revision"] + (0 if existing else 1)
             if not existing:
                 await asyncio.to_thread(self._save, room_id, revision, data)
@@ -213,20 +249,29 @@ class RoomService:
         return self._snapshot(row, user_id)
 
     async def action(
-        self, room_id: str, user_id: int, action_id: str, expected_revision: int,
-        action: str, payload: dict
+        self,
+        room_id: str,
+        user_id: int,
+        action_id: str,
+        expected_revision: int,
+        action: str,
+        payload: dict,
     ) -> dict:
         if not isinstance(action_id, str) or not 1 <= len(action_id) <= 128:
             raise RoomError("invalid_action_id", "action_id is required")
         if not isinstance(payload, dict):
             raise RoomError("invalid_payload", "payload must be an object")
-        digest = hashlib.sha256(json.dumps(
-            [expected_revision, action, payload], sort_keys=True, separators=(",", ":")
-        ).encode()).hexdigest()
+        digest = hashlib.sha256(
+            json.dumps(
+                [expected_revision, action, payload], sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
         replay = await asyncio.to_thread(self._replay, room_id, user_id, action_id)
         if replay:
             if not hmac.compare_digest(replay["digest"], digest):
-                raise RoomError("action_id_reused", "action_id was already used for another request", 409)
+                raise RoomError(
+                    "action_id_reused", "action_id was already used for another request", 409
+                )
             return json.loads(replay["snapshot_json"])
         resolved = None
         if action in {"queue_add", "force_play"}:
@@ -245,7 +290,9 @@ class RoomService:
             replay = await asyncio.to_thread(self._replay, room_id, user_id, action_id)
             if replay:
                 if not hmac.compare_digest(replay["digest"], digest):
-                    raise RoomError("action_id_reused", "action_id was already used for another request", 409)
+                    raise RoomError(
+                        "action_id_reused", "action_id was already used for another request", 409
+                    )
                 return json.loads(replay["snapshot_json"])
             row = await asyncio.to_thread(self._load, room_id)
             self._active(row)
@@ -256,16 +303,29 @@ class RoomService:
             if not member or (user_id in data["kicked"] and action != "request_reentry"):
                 raise RoomError("access_revoked", "Room access is not active", 403)
             if row["revision"] != expected_revision:
-                raise RoomError("stale_revision", "Room state changed. Refresh and retry.", 409,
-                                self._snapshot(row, user_id))
+                raise RoomError(
+                    "stale_revision",
+                    "Room state changed. Refresh and retry.",
+                    409,
+                    self._snapshot(row, user_id),
+                )
             changed, notify, playback_call = await self._apply(
                 row, data, member, action, payload, resolved
             )
             revision = row["revision"] + (1 if changed else 0)
             new_row = self._replace(row, revision, data)
             output = self._snapshot(new_row, user_id)
-            await asyncio.to_thread(self._commit_action, room_id, revision, data, user_id,
-                                    action_id, digest, output, changed)
+            await asyncio.to_thread(
+                self._commit_action,
+                room_id,
+                revision,
+                data,
+                user_id,
+                action_id,
+                digest,
+                output,
+                changed,
+            )
         if playback_call and self.playback:
             result = await self.playback(*playback_call)
             if result:
@@ -290,7 +350,15 @@ class RoomService:
         if action == "settings":
             if not authority:
                 raise RoomError("owner_lock", "Only the room authority can change settings", 403)
-            allowed = {"capacity", "password", "owner_lock", "queue_all", "theme", "tv_size", "duration"}
+            allowed = {
+                "capacity",
+                "password",
+                "owner_lock",
+                "queue_all",
+                "theme",
+                "tv_size",
+                "duration",
+            }
             if set(payload) - allowed:
                 raise RoomError("invalid_settings", "Unknown setting")
             if "capacity" in payload:
@@ -298,7 +366,9 @@ class RoomService:
                 if isinstance(cap, bool) or not isinstance(cap, int) or not 2 <= cap <= 15:
                     raise RoomError("invalid_capacity", "capacity must be from 2 to 15")
                 if cap < len(data["members"]):
-                    raise RoomError("capacity_below_members", "capacity is below current membership")
+                    raise RoomError(
+                        "capacity_below_members", "capacity is below current membership"
+                    )
                 settings["capacity"] = cap
             if "password" in payload:
                 if row["kind"] != "personal":
@@ -321,8 +391,14 @@ class RoomService:
                 if row["kind"] != "personal":
                     raise RoomError("unsupported_setting", "Group rooms do not expire by duration")
                 duration = payload["duration"]
-                if isinstance(duration, bool) or not isinstance(duration, int) or not 300 <= duration <= 86400:
-                    raise RoomError("invalid_duration", "duration must be from 300 to 86400 seconds")
+                if (
+                    isinstance(duration, bool)
+                    or not isinstance(duration, int)
+                    or not 300 <= duration <= 86400
+                ):
+                    raise RoomError(
+                        "invalid_duration", "duration must be from 300 to 86400 seconds"
+                    )
                 data["expires_override"] = row["created_at"] + duration
         elif action in {"queue_add", "force_play"}:
             if not (owner or moderator or settings["queue_all"]):
@@ -332,8 +408,14 @@ class RoomService:
             if action == "queue_add" and data["playback"]["track"]:
                 data["playback"]["queue"].append(resolved)
             else:
-                data["playback"].update({"track": resolved, "status": "playing",
-                                         "position_seconds": 0.0, "server_time": time.time()})
+                data["playback"].update(
+                    {
+                        "track": resolved,
+                        "status": "playing",
+                        "position_seconds": 0.0,
+                        "server_time": time.time(),
+                    }
+                )
             if row["kind"] == "group":
                 playback_call = (row["chat_id"], action, {"track": resolved})
         elif action in {"pause", "resume", "skip"}:
@@ -362,7 +444,9 @@ class RoomService:
             data["pending_reentry"] = [x for x in data["pending_reentry"] if x != target]
         elif action == "moderator":
             if not owner or row["kind"] != "personal":
-                raise RoomError("moderation_forbidden", "Only the personal room owner can delegate", 403)
+                raise RoomError(
+                    "moderation_forbidden", "Only the personal room owner can delegate", 403
+                )
             target = self._target(payload)
             found = next((m for m in data["members"] if m["user_id"] == target), None)
             if not found or target == row["owner_id"]:
@@ -386,7 +470,9 @@ class RoomService:
                 data["invited"].append(target)
         elif action == "leave":
             if owner and row["kind"] == "personal":
-                row = dict(row); row["state"] = "ended"; data["force_state"] = "ended"
+                row = dict(row)
+                row["state"] = "ended"
+                data["force_state"] = "ended"
             else:
                 data["members"] = [m for m in data["members"] if m["user_id"] != uid]
         elif action == "close":
@@ -436,35 +522,66 @@ class RoomService:
         if row["kind"] == "personal" and settings["owner_lock"] and not owner:
             can_shared = False
         return {
-            "id": row["id"], "kind": row["kind"], "owner_id": row["owner_id"],
-            "chat_id": row["chat_id"], "revision": row["revision"], "state": state,
-            "expires_at": expires, "settings": settings,
+            "id": row["id"],
+            "kind": row["kind"],
+            "owner_id": row["owner_id"],
+            "chat_id": row["chat_id"],
+            "revision": row["revision"],
+            "state": state,
+            "expires_at": expires,
+            "settings": settings,
             "members": [{k: v for k, v in m.items() if v is not None} for m in data["members"]],
             "pending_reentry": list(data["pending_reentry"]) if owner else [],
             "playback": pb,
-            "permissions": {"manage_settings": authority, "queue": can_shared or settings["queue_all"],
-                            "control": can_shared, "moderate": can_shared,
-                            "close": owner if row["kind"] == "personal" else authority},
+            "permissions": {
+                "manage_settings": authority,
+                "queue": can_shared or settings["queue_all"],
+                "control": can_shared,
+                "moderate": can_shared,
+                "close": owner if row["kind"] == "personal" else authority,
+            },
         }
 
     @staticmethod
     def _new_data(owner_id: int) -> dict:
-        return {"settings": {"capacity": 2, "owner_lock": True, "queue_all": False,
-                             "theme": "default", "tv_size": "medium"},
-                "password_hash": None, "invited": [], "kicked": [], "pending_reentry": [],
-                "members": [{"user_id": owner_id, "first_name": str(owner_id), "role": "owner"}],
-                "playback": {"track": None, "status": "idle", "position_seconds": 0.0,
-                             "server_time": time.time(), "queue": []}}
+        return {
+            "settings": {
+                "capacity": 2,
+                "owner_lock": True,
+                "queue_all": False,
+                "theme": "default",
+                "tv_size": "medium",
+            },
+            "password_hash": None,
+            "invited": [],
+            "kicked": [],
+            "pending_reentry": [],
+            "members": [{"user_id": owner_id, "first_name": str(owner_id), "role": "owner"}],
+            "playback": {
+                "track": None,
+                "status": "idle",
+                "position_seconds": 0.0,
+                "server_time": time.time(),
+                "queue": [],
+            },
+        }
 
     @staticmethod
     def _clean_track(track: dict) -> dict:
-        if not isinstance(track, dict) or not isinstance(track.get("id"), str) or not isinstance(track.get("title"), str):
+        if (
+            not isinstance(track, dict)
+            or not isinstance(track.get("id"), str)
+            or not isinstance(track.get("title"), str)
+        ):
             raise RoomError("invalid_track", "Search returned an invalid track")
         url = track.get("source_url", "")
-        if not isinstance(url, str) or not (url.startswith("https://www.youtube.com/") or url.startswith("https://youtu.be/")):
+        if not isinstance(url, str) or not (
+            url.startswith("https://www.youtube.com/") or url.startswith("https://youtu.be/")
+        ):
             raise RoomError("unsupported_source", "Only HTTPS YouTube page URLs are supported")
         output = {"id": track["id"][:200], "title": track["title"][:500], "source_url": url[:2000]}
-        if isinstance(track.get("youtube_id"), str): output["youtube_id"] = track["youtube_id"][:32]
+        if isinstance(track.get("youtube_id"), str):
+            output["youtube_id"] = track["youtube_id"][:32]
         if isinstance(track.get("duration"), (int, float)) and math.isfinite(track["duration"]):
             output["duration"] = max(0.0, float(track["duration"]))
         return output
@@ -475,9 +592,15 @@ class RoomService:
         track = self._clean_track(value["track"]) if value.get("track") else None
         queue = [self._clean_track(x) for x in value.get("queue", [])[:100]]
         status = value.get("status", "idle")
-        if status not in {"idle", "playing", "paused"}: status = "idle"
-        return {"track": track, "status": status, "position_seconds": max(0.0, float(value.get("position_seconds", 0))),
-                "server_time": time.time(), "queue": queue}
+        if status not in {"idle", "playing", "paused"}:
+            status = "idle"
+        return {
+            "track": track,
+            "status": status,
+            "position_seconds": max(0.0, float(value.get("position_seconds", 0))),
+            "server_time": time.time(),
+            "queue": queue,
+        }
 
     @staticmethod
     def _timeline(pb: dict) -> dict:
@@ -506,7 +629,9 @@ class RoomService:
     def _verify_password(password: str, encoded: str) -> bool:
         try:
             _, n, r, p, salt, expected = encoded.split("$")
-            actual = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=int(n), r=int(r), p=int(p))
+            actual = hashlib.scrypt(
+                password.encode(), salt=bytes.fromhex(salt), n=int(n), r=int(r), p=int(p)
+            )
             return hmac.compare_digest(actual, bytes.fromhex(expected))
         except (ValueError, TypeError):
             return False
@@ -527,9 +652,11 @@ class RoomService:
     @staticmethod
     def _member(user, role):
         first = user.get("first_name")
-        if not isinstance(first, str) or not first: first = str(user["id"])
+        if not isinstance(first, str) or not first:
+            first = str(user["id"])
         result = {"user_id": user["id"], "first_name": first[:128], "role": role}
-        if isinstance(user.get("photo_url"), str): result["photo_url"] = user["photo_url"][:2000]
+        if isinstance(user.get("photo_url"), str):
+            result["photo_url"] = user["photo_url"][:2000]
         return result
 
     @staticmethod
@@ -546,45 +673,97 @@ class RoomService:
             raise RoomError("room_ended", "The room has ended", 410)
         if expires is not None and expires <= time.time():
             with self._connect() as db:
-                db.execute("UPDATE rooms SET state='ended',end_reason='expired',revision=revision+1 WHERE id=?", (row["id"],))
+                db.execute(
+                    "UPDATE rooms SET state='ended',end_reason='expired',revision=revision+1 WHERE id=?",
+                    (row["id"],),
+                )
             raise RoomError("room_expired", "The room has expired", 410)
 
     def _insert_room(self, row):
-        with self._connect() as db: db.execute("INSERT INTO rooms VALUES(?,?,?,?,?,?,?,?,?,?,?)", row)
+        with self._connect() as db:
+            db.execute("INSERT INTO rooms VALUES(?,?,?,?,?,?,?,?,?,?,?)", row)
+
     def _load(self, room_id):
-        with self._connect() as db: row = db.execute("SELECT * FROM rooms WHERE id=?", (room_id,)).fetchone()
-        if not row: raise RoomError("room_not_found", "Room was not found", 404)
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM rooms WHERE id=?", (room_id,)).fetchone()
+        if not row:
+            raise RoomError("room_not_found", "Room was not found", 404)
         return row
+
     def _group_id(self, chat_id):
-        with self._connect() as db: row = db.execute("SELECT id FROM rooms WHERE chat_id=? AND kind='group' AND state!='ended'", (chat_id,)).fetchone()
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT id FROM rooms WHERE chat_id=? AND kind='group' AND state!='ended'",
+                (chat_id,),
+            ).fetchone()
         return str(row["id"]) if row else None
+
     def _save(self, room_id, revision, data):
         state = data.get("force_state")
         with self._connect() as db:
-            db.execute("UPDATE rooms SET revision=?,data_json=?,state=COALESCE(?,state) WHERE id=?",
-                       (revision, json.dumps(data, separators=(",", ":")), state, room_id))
+            db.execute(
+                "UPDATE rooms SET revision=?,data_json=?,state=COALESCE(?,state) WHERE id=?",
+                (revision, json.dumps(data, separators=(",", ":")), state, room_id),
+            )
+
     def _replay(self, room_id, user_id, action_id):
         with self._connect() as db:
-            return db.execute("SELECT digest,snapshot_json FROM room_actions WHERE room_id=? AND user_id=? AND action_id=?", (room_id,user_id,action_id)).fetchone()
+            return db.execute(
+                "SELECT digest,snapshot_json FROM room_actions WHERE room_id=? AND user_id=? AND action_id=?",
+                (room_id, user_id, action_id),
+            ).fetchone()
+
     def _commit_action(self, room_id, revision, data, user_id, action_id, digest, output, changed):
         with self._connect() as db:
             if changed:
-                db.execute("UPDATE rooms SET revision=?,data_json=?,state=COALESCE(?,state) WHERE id=?",
-                           (revision,json.dumps(data,separators=(",",":")),data.get("force_state"),room_id))
-            db.execute("INSERT INTO room_actions VALUES(?,?,?,?,?,?)", (room_id,user_id,action_id,digest,json.dumps(output,separators=(",",":")),time.time()))
+                db.execute(
+                    "UPDATE rooms SET revision=?,data_json=?,state=COALESCE(?,state) WHERE id=?",
+                    (
+                        revision,
+                        json.dumps(data, separators=(",", ":")),
+                        data.get("force_state"),
+                        room_id,
+                    ),
+                )
+            db.execute(
+                "INSERT INTO room_actions VALUES(?,?,?,?,?,?)",
+                (
+                    room_id,
+                    user_id,
+                    action_id,
+                    digest,
+                    json.dumps(output, separators=(",", ":")),
+                    time.time(),
+                ),
+            )
+
     def _expire_due(self):
         with self._connect() as db:
-            db.execute("UPDATE rooms SET state='ended',end_reason='expired',revision=revision+1 WHERE kind='personal' AND state!='ended' AND expires_at IS NOT NULL AND expires_at<=?", (time.time(),))
+            db.execute(
+                "UPDATE rooms SET state='ended',end_reason='expired',revision=revision+1 WHERE kind='personal' AND state!='ended' AND expires_at IS NOT NULL AND expires_at<=?",
+                (time.time(),),
+            )
+
     async def _expiry_loop(self):
         while not self._stopping.is_set():
             await asyncio.to_thread(self._expire_due)
-            try: await asyncio.wait_for(self._stopping.wait(), 15)
-            except TimeoutError: pass
-    def _lock(self, room_id): return self._locks.setdefault(room_id, asyncio.Lock())
+            try:
+                await asyncio.wait_for(self._stopping.wait(), 15)
+            except TimeoutError:
+                pass
+
+    def _lock(self, room_id):
+        return self._locks.setdefault(room_id, asyncio.Lock())
+
     @staticmethod
-    def _data(row): return json.loads(row["data_json"])
+    def _data(row):
+        return json.loads(row["data_json"])
+
     @staticmethod
     def _replace(row, revision, data):
-        result = dict(row); result["revision"] = revision; result["data_json"] = json.dumps(data)
-        if data.get("force_state"): result["state"] = data["force_state"]
+        result = dict(row)
+        result["revision"] = revision
+        result["data_json"] = json.dumps(data)
+        if data.get("force_state"):
+            result["state"] = data["force_state"]
         return result
