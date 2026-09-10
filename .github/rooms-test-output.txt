@@ -1,23 +1,7 @@
-5 files already formatted
-All checks passed!
-Success: no issues found in 5 source files
-.....FF                                                                  [100%]
+......F                                                                  [100%]
 =================================== FAILURES ===================================
-______ test_real_two_client_cross_updates_movement_kick_and_ticket_replay ______
-tests/test_rooms_gateway.py:197: in test_real_two_client_cross_updates_movement_kick_and_ticket_replay
-    assert {item["user_id"] for item in presence["players"]} == {1, 2}
-E   assert {1} == {1, 2}
-E     
-E     Extra items in the right set:
-E     2
-E     
-E     Full diff:
-E       {
-E           1,
-E     -     2,
-E       }
 ______________ test_websocket_session_expiry_disconnects_receiver ______________
-tests/test_rooms_gateway.py:268: in test_websocket_session_expiry_disconnects_receiver
+tests/test_rooms_gateway.py:272: in test_websocket_session_expiry_disconnects_receiver
     with pytest.raises(ConnectionClosed) as closed:
 E   Failed: DID NOT RAISE ConnectionClosed
 =============================== warnings summary ===============================
@@ -31,21 +15,16 @@ tests/test_rooms_gateway.py::test_http_bounds_replay_compass_identity_and_pendin
 
 tests/test_rooms_gateway.py::test_real_two_client_cross_updates_movement_kick_and_ticket_replay
 tests/test_rooms_gateway.py::test_real_two_client_cross_updates_movement_kick_and_ticket_replay
+tests/test_rooms_gateway.py::test_real_two_client_cross_updates_movement_kick_and_ticket_replay
 tests/test_rooms_gateway.py::test_websocket_session_expiry_disconnects_receiver
   /opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/websockets/legacy/server.py:1178: DeprecationWarning: remove second argument of ws_handler
     warnings.warn("remove second argument of ws_handler", DeprecationWarning)
 
+tests/test_rooms_gateway.py::test_real_two_client_cross_updates_movement_kick_and_ticket_replay
+  /opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/websockets/exceptions.py:125: DeprecationWarning: ConnectionClosed.code is deprecated; use Protocol.close_code or ConnectionClosed.rcvd.code
+    warnings.warn(  # deprecated in 13.1 - 2024-09-21
+
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
 =========================== short test summary info ============================
-FAILED tests/test_rooms_gateway.py::test_real_two_client_cross_updates_movement_kick_and_ticket_replay - assert {1} == {1, 2}
-  
-  Extra items in the right set:
-  2
-  
-  Full diff:
-    {
-        1,
-  -     2,
-    }
 FAILED tests/test_rooms_gateway.py::test_websocket_session_expiry_disconnects_receiver - Failed: DID NOT RAISE ConnectionClosed
-2 failed, 5 passed, 5 warnings in 1.88s
+1 failed, 6 passed, 7 warnings in 2.26s
