@@ -17,35 +17,46 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -q -e '.[dev]'
-      - name: Apply final scoped typing corrections
+      - name: Finalize scoped delivery typing
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          model = Path('src/parlay/ml/model.py')
-          text = model.read_text()
-          needle = '        metrics = self._evaluate(\n'
-          if needle in text:
-              text = text.replace(needle, '        metrics: dict[str, Any] = self._evaluate(\n', 1)
-          model.write_text(text)
-
-          service = Path('src/parlay/ml/service.py')
-          text = service.read_text()
-          needle = 'await asyncio.to_thread(self.store.claim_job, "delivery", slot)'
-          if needle not in text:
-              raise SystemExit('delivery claim expression not found')
+          path = Path('src/parlay/ml/service.py')
+          text = path.read_text()
+          old = '''            if self._deliver and await asyncio.to_thread(
+                lambda: self.store.claim_job("delivery", slot)
+            ):
+                await self._deliver_hour()
+          '''
+          new = '''            deliver = self._deliver
+            if deliver is not None:
+                delivery_claimed = await asyncio.to_thread(
+                    self.store.claim_job, "delivery", slot
+                )
+                if delivery_claimed:
+                    await self._deliver_hour(deliver)
+          '''
+          if old not in text:
+              raise SystemExit('typed delivery block not found')
+          text = text.replace(old, new, 1)
           text = text.replace(
-              needle,
-              'await asyncio.to_thread(lambda: self.store.claim_job("delivery", slot))',
+              '    async def _deliver_hour(self) -> None:\n',
+              '    async def _deliver_hour(self, deliver: Delivery) -> None:\n',
               1,
           )
-          service.write_text(text)
+          text = text.replace(
+              '            if not items or not self._deliver:\n                continue\n            result = self._deliver(',
+              '            if not items:\n                continue\n            result = deliver(',
+              1,
+          )
+          path.write_text(text)
           PY
-          ruff format src/parlay/ml/model.py src/parlay/ml/service.py
+          ruff format src/parlay/ml/service.py
           git config user.name 'Alex C11'
           git config user.email 'alex.c992954@gmail.com'
-          git add src/parlay/ml/model.py src/parlay/ml/service.py
-          git commit -m 'fix(ml): complete strict typing corrections'
+          git add src/parlay/ml/service.py
+          git commit -m 'fix(ml): type stable delivery callback snapshot'
           git push
       - run: ruff check src/parlay/ml tests/test_ml.py
       - run: ruff format --check src/parlay/ml tests/test_ml.py docs/parlay-ml.md
