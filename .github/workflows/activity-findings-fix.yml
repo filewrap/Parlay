@@ -9,16 +9,15 @@ permissions:
 
 jobs:
   fix:
+    if: github.event.head_commit.message != 'Format activity findings'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Apply scoped fixes
-        run: python .github/activity_findings_fix.py
       - run: python -m pip install 'ruff>=0.6' -q
       - run: ruff format src/parlay/activity.py tests/test_activity.py
       - run: ruff check src/parlay/activity.py tests/test_activity.py
       - name: Commit owned files
-        run: git config user.name 'Alex C11' && git config user.email 'alex.c992954@gmail.com' && git add src/parlay/activity.py tests/test_activity.py && git commit -m 'Harden activity state update handling' && git push
+        run: git config user.name 'Alex C11' && git config user.email 'alex.c992954@gmail.com' && git add src/parlay/activity.py tests/test_activity.py && git commit -m 'Format activity findings' && git push
