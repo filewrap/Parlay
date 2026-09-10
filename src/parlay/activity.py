@@ -69,6 +69,7 @@ class ActivityTracker:
         self._periodic_task: asyncio.Task[None] | None = None
         self._reconcile_tasks: dict[int, asyncio.Task[None]] = {}
         self._discovery_task: asyncio.Task[None] | None = None
+        self._last_discovery_at = 0.0
 
     async def start(self) -> None:
         """Open storage, clear stale transport, discover calls, and reconcile."""
@@ -557,6 +558,10 @@ class ActivityTracker:
     def _schedule_discovery(self) -> None:
         if self._stopping or not self._started:
             return
+        now = time.monotonic()
+        if now - self._last_discovery_at < 0.1:
+            return
+        self._last_discovery_at = now
         if self._discovery_task is not None and not self._discovery_task.done():
             return
         self._discovery_task = asyncio.create_task(
