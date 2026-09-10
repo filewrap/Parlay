@@ -19,8 +19,8 @@ jobs:
           from pathlib import Path
           path=Path('src/parlay/rooms/service.py')
           text=path.read_text()
-          old='''            if not member or user_id in data["kicked"]:\n                raise RoomError("access_revoked", "Room access is not active", 403)'''
-          new='''            if not member or (user_id in data["kicked"] and action != "request_reentry"):\n                raise RoomError("access_revoked", "Room access is not active", 403)'''
+          old='''            member = next((m for m in data["members"] if m["user_id"] == user_id), None)\n            if not member or user_id in data["kicked"]:\n                raise RoomError("access_revoked", "Room access is not active", 403)'''
+          new='''            member = next((m for m in data["members"] if m["user_id"] == user_id), None)\n            if action == "request_reentry" and user_id in data["kicked"] and not member:\n                member = {"user_id": user_id, "role": "participant"}\n            if not member or (user_id in data["kicked"] and action != "request_reentry"):\n                raise RoomError("access_revoked", "Room access is not active", 403)'''
           assert text.count(old)==1
           path.write_text(text.replace(old,new))
           test=Path('tests/test_rooms_gateway.py')
@@ -30,9 +30,9 @@ jobs:
           assert value.count(old)==1
           test.write_text(value.replace(old,new))
           PY
-      - run: pip install -e . 'fastapi>=0.115,<1' 'uvicorn>=0.30,<1' pytest pytest-asyncio httpx
+      - run: pip install -e . 'fastapi>=0.115,<1' 'uvicorn>=0.30,<1' pytest pytest-asyncio pytest-timeout httpx
       - run: python -m compileall -q src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
-      - run: pytest -q tests/test_rooms_service.py tests/test_rooms_gateway.py
+      - run: pytest -q --timeout=30 tests/test_rooms_service.py tests/test_rooms_gateway.py
       - name: Commit scoped patch
         run: |
           git config user.name 'Alex C11'
