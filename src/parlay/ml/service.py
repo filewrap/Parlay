@@ -228,25 +228,26 @@ class CompassService:
                     await asyncio.to_thread(self.train)
                 except Exception:
                     pass
-            if self._deliver and await asyncio.to_thread(
-                lambda: self.store.claim_job("delivery", slot)
-            ):
-                await self._deliver_hour()
+            deliver = self._deliver
+            if deliver is not None:
+                delivery_claimed = await asyncio.to_thread(self.store.claim_job, "delivery", slot)
+                if delivery_claimed:
+                    await self._deliver_hour(deliver)
             try:
                 await asyncio.wait_for(self._stopping.wait(), timeout=60.0)
             except TimeoutError:
                 continue
 
-    async def _deliver_hour(self) -> None:
+    async def _deliver_hour(self, deliver: Delivery) -> None:
         for preference in await asyncio.to_thread(self.store.enabled_users):
             if self._quiet(preference):
                 continue
             items = await asyncio.to_thread(
                 self.recommend, preference["user_id"], preference["recommendation_count"]
             )
-            if not items or not self._deliver:
+            if not items:
                 continue
-            result = self._deliver(preference["user_id"], "Your hourly Compass picks", items)
+            result = deliver(preference["user_id"], "Your hourly Compass picks", items)
             if inspect.isawaitable(result):
                 result = await result
             if result is False or result == "blocked":
