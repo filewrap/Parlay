@@ -57,6 +57,7 @@ class RoomService:
         self.on_reentry = on_reentry
         self.search = search
         self.on_action = on_action
+        self.playback_timeout = 90.0
         self._locks: dict[str, asyncio.Lock] = {}
         self._listeners: dict[str, set[asyncio.Queue]] = {}
         self._expiry_task: asyncio.Task | None = None
@@ -170,8 +171,25 @@ class RoomService:
                 return room_id
 
         room_id = await asyncio.to_thread(ensure)
-        result = await self.snapshot(room_id, owner_id)
-        self._publish(room_id, result)
+        if not await self._check(self.member, owner_id, chat_id):
+            raise RoomError("not_group_member", "Telegram group membership is required", 403)
+        async with self._lock(room_id):
+            row = await asyncio.to_thread(self._load, room_id)
+            self._active(row)
+            data = self._data(row)
+            admitted = any(item["user_id"] == owner_id for item in data["members"])
+            revision = row["revision"]
+            if not admitted:
+                if len(data["members"]) >= data["settings"]["capacity"]:
+                    raise RoomError("room_full", "The room is at capacity", 409)
+                data["members"].append(
+                    {"user_id": owner_id, "first_name": str(owner_id), "role": "participant"}
+                )
+                revision += 1
+                await asyncio.to_thread(self._save, room_id, revision, data)
+            result = await self._snapshot_for(self._replace(row, revision, data), owner_id)
+        if not admitted:
+            self._publish(room_id, result)
         return result
 
     async def end_group(self, chat_id: int, reason: str) -> None:
@@ -306,6 +324,7 @@ class RoomService:
         async with self._lock(room_id):
             row = await asyncio.to_thread(self._load, room_id)
             self._active(row)
+            self._actionable(row)
             data = self._data(row)
             member = next((m for m in data["members"] if m["user_id"] == user_id), None)
             reentry_request = (
@@ -353,11 +372,22 @@ class RoomService:
             if playback_call:
                 if not self.playback:
                     raise RoomError("playback_unavailable", "Group playback is not configured", 503)
-                actual = await self.playback(*playback_call)
+                try:
+                    actual = await asyncio.wait_for(
+                        self.playback(*playback_call), timeout=self.playback_timeout
+                    )
+                except TimeoutError as exc:
+                    raise RoomError(
+                        "playback_timeout", "Group playback timed out. Retry the action.", 504
+                    ) from exc
                 if not actual:
                     raise RoomError(
                         "playback_unavailable", "Group playback did not confirm the action", 503
                     )
+                row = await asyncio.to_thread(self._load, room_id)
+                self._active(row)
+                self._actionable(row)
+                data = self._data(row)
                 data["playback"] = self._clean_playback(actual)
 
             revision = row["revision"] + (1 if changed else 0)
@@ -405,6 +435,8 @@ class RoomService:
         if row["kind"] == "group":
             authority = await self._check(self.authority, uid, row["chat_id"])
         privileged = authority if row["kind"] == "group" else personal_owner
+        delegated = moderator and row["kind"] == "personal"
+        can_shared = privileged or delegated
         notify = playback_call = None
         if action == "settings":
             if not privileged:
@@ -460,7 +492,7 @@ class RoomService:
                     )
                 data["expires_override"] = row["created_at"] + duration
         elif action in {"queue_add", "force_play"}:
-            if not (privileged or moderator or settings["queue_all"]):
+            if not (can_shared or settings["queue_all"]):
                 raise RoomError("queue_forbidden", "Queue changes are restricted", 403)
             if settings["owner_lock"] and not personal_owner and row["kind"] == "personal":
                 raise RoomError("owner_lock", "Owner Lock is enabled", 403)
@@ -479,7 +511,12 @@ class RoomService:
                 )
         elif action in {"pause", "resume", "skip"}:
             if not (
-                privileged or moderator or (settings["queue_all"] and not settings["owner_lock"])
+                can_shared
+                or (
+                    row["kind"] == "personal"
+                    and settings["queue_all"]
+                    and not settings["owner_lock"]
+                )
             ):
                 raise RoomError("control_forbidden", "Playback controls are restricted", 403)
             if row["kind"] == "group":
@@ -511,7 +548,7 @@ class RoomService:
                 and (target_member["role"] in {"owner", "moderator"} or target_authority)
             )
             if (
-                not (privileged or moderator)
+                not can_shared
                 or (row["kind"] == "personal" and target == row["owner_id"])
                 or protected
             ):
@@ -601,7 +638,8 @@ class RoomService:
         settings["password_required"] = bool(data["password_hash"])
         expires = data.get("expires_override", row["expires_at"])
         state = data.get("force_state", row["state"])
-        can_shared = authority or role == "moderator"
+        delegated = role == "moderator" and row["kind"] == "personal"
+        can_shared = authority or delegated
         if row["kind"] == "personal" and settings["owner_lock"] and not personal_owner:
             can_shared = False
         return {
@@ -619,7 +657,12 @@ class RoomService:
             "permissions": {
                 "manage_settings": authority,
                 "queue": can_shared or settings["queue_all"],
-                "control": can_shared or (settings["queue_all"] and not settings["owner_lock"]),
+                "control": can_shared
+                or (
+                    row["kind"] == "personal"
+                    and settings["queue_all"]
+                    and not settings["owner_lock"]
+                ),
                 "moderate": can_shared,
                 "close": authority,
             },
@@ -773,6 +816,15 @@ class RoomService:
         if isinstance(value, bool) or not isinstance(value, int):
             raise RoomError("invalid_user", "user_id must be an integer")
         return value
+
+    @staticmethod
+    def _actionable(row) -> None:
+        if row["state"] == "recovering":
+            raise RoomError(
+                "room_recovering",
+                "Room playback is recovering. Refresh and retry.",
+                409,
+            )
 
     def _active(self, row):
         data = self._data(row)

@@ -327,3 +327,152 @@ async def test_action_callback_ignores_unauthorized_and_failed_actions(tmp_path)
             other["id"], 1, "missing", other["revision"], "queue_add", {"query": "Missing"}
         )
     assert events == []
+
+
+@pytest.mark.asyncio
+async def test_ensure_group_admits_later_live_operator(tmp_path):
+    operators = {7, 8}
+    service = RoomService(
+        tmp_path / "rooms.db",
+        authority=lambda uid, chat: uid in operators,
+        member=lambda uid, chat: uid in operators,
+    )
+    first = await service.ensure_group(100, 1, 7)
+    second = await service.ensure_group(100, 1, 8)
+    assert second["id"] == first["id"] and second["owner_id"] == 7
+    assert second["permissions"]["manage_settings"] is True
+    assert {item["user_id"] for item in second["members"]} == {7, 8}
+
+
+@pytest.mark.asyncio
+async def test_group_actions_and_permissions_follow_live_authority(tmp_path):
+    operators = {7}
+
+    async def playback(chat_id, action, payload):
+        track = payload.get("track")
+        return {
+            "track": track,
+            "status": "playing" if track else "idle",
+            "position_seconds": 0,
+            "queue": [],
+        }
+
+    service = RoomService(
+        tmp_path / "rooms.db",
+        playback=playback,
+        authority=lambda uid, chat: uid in operators,
+        member=lambda uid, chat: uid in {7, 8, 9},
+        search=search,
+    )
+    room = await service.ensure_group(100, 1, 7)
+    room = await service.ensure_group(100, 1, 8)
+    room = await service.join(room["id"], user(9))
+    operators.clear()
+    operators.add(8)
+    stale = await service.snapshot(room["id"], 7)
+    live = await service.snapshot(room["id"], 8)
+    assert not any(stale["permissions"].values())
+    assert all(live["permissions"].values())
+    with pytest.raises(RoomError, match="restricted"):
+        await service.action(
+            room["id"], 7, "stale", stale["revision"], "queue_add", {"query": "No"}
+        )
+    room = await service.action(
+        room["id"], 8, "queue", live["revision"], "queue_add", {"query": "Queued"}
+    )
+    room = await service.action(
+        room["id"], 8, "play", room["revision"], "force_play", {"query": "Played"}
+    )
+    room = await service.action(room["id"], 8, "pause", room["revision"], "pause", {})
+    room = await service.action(room["id"], 8, "skip", room["revision"], "skip", {})
+    room = await service.action(room["id"], 8, "kick", room["revision"], "kick", {"user_id": 9})
+    assert 9 not in {item["user_id"] for item in room["members"]}
+    room = await service.action(
+        room["id"], 8, "queue-all", room["revision"], "settings", {"queue_all": True}
+    )
+    stale = await service.snapshot(room["id"], 7)
+    assert stale["permissions"]["queue"] is True and stale["permissions"]["control"] is False
+    queued = await service.action(
+        room["id"], 7, "allowed", stale["revision"], "queue_add", {"query": "Allowed"}
+    )
+    with pytest.raises(RoomError, match="restricted"):
+        await service.action(room["id"], 7, "denied", queued["revision"], "pause", {})
+
+
+@pytest.mark.asyncio
+async def test_recovering_group_is_readable_but_controls_retry(tmp_path):
+    service = RoomService(
+        tmp_path / "rooms.db", authority=lambda uid, chat: True, member=lambda uid, chat: True
+    )
+    room = await service.ensure_group(100, 1, 7)
+    await service.set_recovering(100, "voice restart")
+    recovering = await service.snapshot(room["id"], 7)
+    assert recovering["state"] == "recovering"
+    with pytest.raises(RoomError) as error:
+        await service.action(room["id"], 7, "blocked", recovering["revision"], "close", {})
+    assert error.value.status == 409 and error.value.code == "room_recovering"
+
+
+@pytest.mark.asyncio
+async def test_group_playback_timeout_is_retryable_without_success_record(tmp_path):
+    calls = 0
+
+    async def playback(chat_id, action, payload):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await __import__("asyncio").sleep(1)
+        return {"track": payload["track"], "status": "playing", "position_seconds": 0, "queue": []}
+
+    service = RoomService(
+        tmp_path / "rooms.db",
+        playback=playback,
+        authority=lambda uid, chat: True,
+        member=lambda uid, chat: True,
+        search=search,
+    )
+    service.playback_timeout = 0.01
+    room = await service.ensure_group(100, 1, 7)
+    with pytest.raises(RoomError) as error:
+        await service.action(
+            room["id"], 7, "play", room["revision"], "force_play", {"query": "One"}
+        )
+    assert (
+        error.value.code == "playback_timeout"
+        and (await service.snapshot(room["id"], 7))["revision"] == room["revision"]
+    )
+    result = await service.action(
+        room["id"], 7, "play", room["revision"], "force_play", {"query": "One"}
+    )
+    assert calls == 2 and result["playback"]["track"]["title"] == "One"
+
+
+@pytest.mark.asyncio
+async def test_group_close_during_playback_does_not_commit_success(tmp_path):
+    service = None
+
+    async def playback(chat_id, action, payload):
+        with service._connect() as db:
+            db.execute(
+                "UPDATE rooms SET state='ended',end_reason='call_ended',revision=revision+1 WHERE chat_id=?",
+                (chat_id,),
+            )
+        return {"track": payload["track"], "status": "playing", "position_seconds": 0, "queue": []}
+
+    service = RoomService(
+        tmp_path / "rooms.db",
+        playback=playback,
+        authority=lambda uid, chat: True,
+        member=lambda uid, chat: True,
+        search=search,
+    )
+    room = await service.ensure_group(100, 1, 7)
+    with pytest.raises(RoomError, match="ended"):
+        await service.action(
+            room["id"], 7, "play", room["revision"], "force_play", {"query": "One"}
+        )
+    with service._connect() as db:
+        count = db.execute(
+            "SELECT count(*) FROM room_actions WHERE room_id=? AND action_id='play'", (room["id"],)
+        ).fetchone()[0]
+    assert count == 0
