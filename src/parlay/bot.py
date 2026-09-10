@@ -166,6 +166,7 @@ class CompanionBot:
             await self._client.disconnect()
 
     def _register_handlers(self) -> None:
+        assert self._client is not None
         if self._registered:
             return
         self._client.add_event_handler(
@@ -373,6 +374,7 @@ class CompanionBot:
                 result = await asyncio.to_thread(
                     self._state.save_result, token, {"room_id": str(room["id"])}
                 )
+        assert result is not None
         await event.edit(
             "Parlay room ready.",
             buttons=Button.url("Open room", self.room_url(result["room_id"])),
@@ -418,6 +420,7 @@ class CompanionBot:
         if not await asyncio.to_thread(self._state.eligible, owner_id):
             return False
         try:
+            assert self._client is not None
             snapshot = await self.rooms.snapshot(room_id, owner_id)
             token = await asyncio.to_thread(
                 self._state.callback,
@@ -444,6 +447,7 @@ class CompanionBot:
         if not await asyncio.to_thread(self._state.eligible, uid):
             return False
         try:
+            assert self._client is not None
             await self._send_items(uid, text, items, self._client.send_message)
             return True
         except Exception:
@@ -493,7 +497,9 @@ class CompanionBot:
             return 7200
         match = _DURATION.fullmatch(value.strip())
         if not match:
-            raise ValueError("Duration must be one value in seconds, minutes, or hours, such as 30m.")
+            raise ValueError(
+                "Duration must be one value in seconds, minutes, or hours, such as 30m."
+            )
         amount = int(match.group(1))
         seconds = amount * {"s": 1, "m": 60, "h": 3600}[match.group(2).lower()]
         if not 300 <= seconds <= 86400:

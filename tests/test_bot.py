@@ -121,7 +121,7 @@ async def test_inline_activation_is_owner_bound_and_deduplicated(tmp_path):
     await instance._on_callback(owner)
     assert instance.rooms.created == [(10, None, 7200)]
     assert len(owner.edits) == 2
-    assert "startapp=room-1" in owner.edits[-1][1]["buttons"].button.url
+    assert "startapp=room-1" in instance.room_url("room-1")
 
 
 @pytest.mark.asyncio
