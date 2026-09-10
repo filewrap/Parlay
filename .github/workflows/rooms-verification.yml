@@ -1,0 +1,14 @@
+name: Rooms verification
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -e . 'fastapi>=0.115,<1' 'uvicorn>=0.30,<1' pytest pytest-asyncio httpx
+      - run: python -m compileall -q src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
+      - run: pytest -q tests/test_rooms_service.py tests/test_rooms_gateway.py
