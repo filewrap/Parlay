@@ -103,14 +103,16 @@ new = '''    room_id = room["id"]
 '''
 assert text.count(old) == 1, text.count(old)
 text = text.replace(old, new, 1)
-text = text.replace(
+request_end = text.index('    owner = await service.snapshot(room_id, 1)')
+tail = text[request_end:]
+tail = tail.replace(
     'room["id"], 1, "approve", owner["revision"]',
     'room_id, 1, "approve", owner["revision"]',
     1,
 )
-text = text.replace(
+tail = tail.replace(
     'service.join(room["id"], user(2), "secret")',
     'service.join(room_id, user(2), "secret")',
     1,
 )
-tests.write_text(text)
+tests.write_text(text[:request_end] + tail)
