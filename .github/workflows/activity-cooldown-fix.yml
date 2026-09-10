@@ -13,38 +13,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Add discovery cooldown
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          p = Path('src/parlay/activity.py')
-          s = p.read_text()
-          s = s.replace(
-              '        self._discovery_task: asyncio.Task[None] | None = None\n',
-              '        self._discovery_task: asyncio.Task[None] | None = None\n        self._last_discovery_at = 0.0\n',
-              1,
-          )
-          old = '''    def _schedule_discovery(self) -> None:
-        if self._stopping or not self._started:
-            return
-        if self._discovery_task is not None and not self._discovery_task.done():
-            return
-        self._discovery_task = asyncio.create_task(
-'''
-          new = '''    def _schedule_discovery(self) -> None:
-        if self._stopping or not self._started:
-            return
-        now = time.monotonic()
-        if now - self._last_discovery_at < 0.1:
-            return
-        if self._discovery_task is not None and not self._discovery_task.done():
-            return
-        self._last_discovery_at = now
-        self._discovery_task = asyncio.create_task(
-'''
-          assert old in s
-          p.write_text(s.replace(old, new, 1))
-          PY
+      - name: Add discovery cooldown state
+        run: sed -i '/self._discovery_task.*None/a\        self._last_discovery_at = 0.0' src/parlay/activity.py
+      - name: Add discovery cooldown check
+        run: sed -i '/if self._stopping or not self._started:/a\            return\n        now = time.monotonic()\n        if now - self._last_discovery_at < 0.1:\n            return\n        self._last_discovery_at = now' src/parlay/activity.py
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
