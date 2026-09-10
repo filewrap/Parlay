@@ -486,8 +486,10 @@ class ParlayApp:
         if self.rooms is None:
             return
 
+        db_path = self.rooms.db_path
+
         def active_rooms() -> list[Any]:
-            with sqlite3.connect(self.rooms.db_path) as db:
+            with sqlite3.connect(db_path) as db:
                 return db.execute(
                     "SELECT chat_id,call_id,owner_id FROM rooms WHERE kind='group' AND state!='ended'"
                 ).fetchall()

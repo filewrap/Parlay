@@ -28,7 +28,7 @@ if [[ ! -f .env ]]; then
 fi
 
 # Ensure required keys are present and non-empty.
-required=(TELEGRAM_API_ID TELEGRAM_API_HASH OPERATOR_ID GEMINI_API_KEY)
+required=(TELEGRAM_API_ID TELEGRAM_API_HASH OPERATOR_ID)
 for key in "${required[@]}"; do
   if ! grep -qE "^${key}=.+" .env; then
     err "missing or empty ${key} in .env"
