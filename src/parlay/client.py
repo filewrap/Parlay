@@ -1,36 +1,24 @@
-"""Telethon client construction and authorized startup.
+"""Telethon client construction and non-interactive authorized startup.
 
-This module owns how the `TelegramClient` is built and brought to an authorized
-state. It is isolated from `app.py` so the client wiring is testable and so the
-choice between a portable `StringSession` and an on-disk session file lives in
-one place.
-
-Session resolution order in `build_client`:
-1. `TELEGRAM_STRING_SESSION`, when set, always wins (wrapped in `StringSession`).
-2. If a `.session` file for `TELEGRAM_SESSION` already exists on disk (the
-   user put one there), it is used as an SQLite file session.
-3. If no such file exists but the `TELEGRAM_SESSION` value itself parses as a
-   Telethon string session, it is wrapped in `StringSession`. This catches the
-   common misconfiguration of exporting the session string under the wrong
-   variable, which would otherwise make sqlite3 treat the whole string as a
-   database filename and crash with 'unable to open database file'.
-4. Otherwise the value is a session file name for Telethon to create.
-
-Telethon is a pure-Python dependency, so importing it here is safe in CI. The
-network calls (`connect`, `start`, `sign_in`) only run when `start_authorized`
-is invoked against a real account; unit tests drive fakes instead.
+Prefer the configured SQLite session file, then a single .session file in the
+working directory. Otherwise use TELEGRAM_STRING_SESSION or parse TELEGRAM_SESSION
+as a portable Telethon session. Ambiguous files and invalid serialized credentials
+fail with safe errors. Never log session configuration values.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import re
+import struct
+from pathlib import Path
 
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 from telethon.sessions import StringSession
 
-from .config import Config
+from .config import Config, ConfigError
 
 log = logging.getLogger(__name__)
 
@@ -39,71 +27,76 @@ class AuthorizationError(RuntimeError):
     """Raised when the client cannot reach an authorized state non-interactively."""
 
 
-def _session_file_exists(name: str) -> bool:
-    """True when the on-disk session database for `name` already exists.
-
-    Telethon appends '.session' to names that lack it, so check both forms.
-    """
-    if os.path.isfile(name):
-        return True
-    return not name.endswith(".session") and os.path.isfile(name + ".session")
+def _existing_session_file(name: str) -> str | None:
+    """Match Telethon's suffix rule, then discover a single supplied database."""
+    filename = name if name.endswith(".session") else name + ".session"
+    # isfile returns False for overlong paths, including pasted credentials.
+    if name and os.path.isfile(filename):
+        return filename
+    candidates = [path for path in Path.cwd().glob("*.session") if path.is_file()]
+    if len(candidates) > 1:
+        raise ConfigError(
+            "Multiple .session files found. Set TELEGRAM_SESSION to the intended file path."
+        )
+    return str(candidates[0]) if candidates else None
 
 
 def _as_string_session(value: str) -> StringSession | None:
-    """Parse `value` as a Telethon string session, or None if it is not one.
-
-    A real parse attempt beats shape heuristics: `StringSession` validates the
-    version byte and unpacks the auth key, so ordinary file names fail cleanly.
-    """
-    # File names are short; every real string session is far longer.
-    if len(value) < 100:
+    """Parse locally without authenticating or exposing the credential."""
+    if not value:
         return None
     try:
         session = StringSession(value)
-    except Exception:
+    except (ValueError, struct.error):
         return None
-    if session.auth_key is None:
-        return None
-    return session
+    return session if session.auth_key is not None else None
+
+
+def _invalid_session() -> ConfigError:
+    return ConfigError(
+        "Invalid or unsupported Telegram string session. Generate a Telethon "
+        "StringSession and set TELEGRAM_STRING_SESSION, or supply a Telethon .session file. "
+        "Session strings from other libraries are not interchangeable."
+    )
 
 
 def build_client(config: Config) -> TelegramClient:
-    """Construct a TelegramClient from config.
+    """Select a supplied file before portable credentials, without network I/O.
 
-    A `TELEGRAM_STRING_SESSION` takes precedence (portable, ideal for ephemeral
-    hosts). Otherwise an existing `.session` file the user put on disk is used.
-    If there is no file and the configured session value itself is a string
-    session, it is wrapped in `StringSession` instead of being passed to
-    sqlite3 as a filename. Both persist the auth key and the entity cache, so
-    the account only signs in once.
+    Explicit file paths disambiguate discovery in the working directory.
+    A normal unused filename remains supported for non-interactive startup to
+    report an unauthorized session. Serialized-looking invalid input never goes
+    to SQLite. StringSession retains connection/authentication data, not the
+    persistent entity cache supplied by SQLiteSession.
     """
+    name = config.session.strip()
     session: StringSession | str
-    if config.string_session:
-        session = StringSession(config.string_session)
-        log.info("using portable StringSession for authentication")
-    elif _session_file_exists(config.session):
-        session = config.session
-        log.info("using existing on-disk session file %r", config.session)
-    elif (parsed := _as_string_session(config.session)) is not None:
+    if (filename := _existing_session_file(name)) is not None:
+        session = filename
+        log.info("using existing on-disk Telegram session")
+    elif config.string_session:
+        parsed = _as_string_session(config.string_session.strip())
+        if parsed is None:
+            raise _invalid_session()
         session = parsed
-        log.info(
-            "TELEGRAM_SESSION value is a string session; wrapping it in "
-            "StringSession instead of treating it as a file name"
-        )
+        log.info("using portable StringSession for authentication")
+    elif (parsed := _as_string_session(name)) is not None:
+        session = parsed
+        log.info("using StringSession supplied through TELEGRAM_SESSION")
     else:
-        session = config.session
-        log.info("creating on-disk session file %r", config.session)
+        # Portable credentials are long URL-safe base64 values. Also reject an
+        # overlong filename component, rather than leaking it through SQLite.
+        if not name or len(os.fsencode(Path(name).name)) > 255 or (
+            len(name) >= 300 and re.fullmatch(r"[A-Za-z0-9_=\-]+", name)
+        ):
+            raise _invalid_session()
+        session = name
+        log.info("creating on-disk Telegram session")
     return TelegramClient(session, config.api_id, config.api_hash)
 
 
 async def start_authorized(client: TelegramClient) -> None:
-    """Connect and ensure the client is authorized, without interactive prompts.
-
-    Parlay runs unattended, so a fresh login (which needs a login code, and
-    possibly a 2FA password) cannot be completed here. In that case we raise
-    `AuthorizationError` telling the Operator to generate a session first. An
-    already-authorized session simply connects.
-    """
+    """Connect and ensure authorization without interactive login prompts."""
     await client.connect()
     try:
         if await client.is_user_authorized():
