@@ -1,0 +1,94 @@
+name: Rooms callback final repair
+on:
+  push:
+    paths: [.github/workflows/rooms-callback-final-repair.yml]
+permissions:
+  contents: write
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - name: Repair source and tests
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src/parlay/rooms/service.py'); s=p.read_text(); a=s.index('\n@staticmethod\ndef _action_track'); b=s.index('    @staticmethod\n    def _clean_track',a)
+          h='''
+              @staticmethod
+              def _action_track(track: dict[str, Any]) -> dict[str, Any]:
+                  candidate = track.get("youtube_id")
+                  valid = isinstance(candidate, str) and len(candidate) == 11 and all(c.isalnum() or c in "-_" for c in candidate)
+                  if not valid:
+                      parsed = urlsplit(track["source_url"])
+                      candidate = parsed.path.strip("/").split("/", 1)[0] if parsed.netloc.lower() in {"youtu.be", "www.youtu.be"} else parse_qs(parsed.query).get("v", [""])[0]
+                  if not isinstance(candidate, str) or len(candidate) != 11 or not all(c.isalnum() or c in "-_" for c in candidate):
+                      raise RoomError("invalid_track", "Search returned an invalid YouTube track")
+                  output = dict(track)
+                  output["youtube_id"] = candidate
+                  return output
+
+          '''
+          h='\n'.join(x[10:] if x.startswith('          ') else x for x in h.splitlines()); p.write_text(s[:a]+'\n'+h+s[b:])
+          t=Path('tests/test_rooms_service.py'); body=t.read_text(); body=body[:body.index('\n@pytest.mark.asyncio\nasync def test_action_callback_success')]
+          x='''
+
+          @pytest.mark.asyncio
+          async def test_action_callback_success_replay_and_failure_isolation(tmp_path):
+              events = []
+              service = None
+              async def on_action(room_id, user_id, action, track, event_id):
+                  events.append((room_id, user_id, action, track, event_id))
+                  if action == "force_play":
+                      raise RuntimeError("ML unavailable")
+              service = RoomService(tmp_path / "rooms.db", search=search, on_action=on_action)
+              room = await service.create_personal(1)
+              queued = await service.action(room["id"], 1, "select-1", room["revision"], "queue_add", {"query": "Selected"})
+              assert await service.action(room["id"], 1, "select-1", room["revision"], "queue_add", {"query": "Selected"}) == queued
+              assert len(events) == 1
+              assert events[0][:3] == (room["id"], 1, "queue_add")
+              assert events[0][3]["youtube_id"] == "abc12345678"
+              assert events[0][4] == f"{room['id']}:1:select-1"
+              played = await service.action(room["id"], 1, "play-1", queued["revision"], "force_play", {"query": "Played"})
+              assert played["playback"]["track"]["title"] == "Played"
+              assert await service.action(room["id"], 1, "play-1", queued["revision"], "force_play", {"query": "Played"}) == played
+              assert len(events) == 2
+
+
+          @pytest.mark.asyncio
+          async def test_action_callback_ignores_unauthorized_and_failed_actions(tmp_path):
+              events = []
+              async def on_action(*args):
+                  events.append(args)
+              service = RoomService(tmp_path / "rooms.db", search=search, on_action=on_action)
+              room = await service.create_personal(1)
+              with pytest.raises(RoomError):
+                  await service.action(room["id"], 2, "denied", room["revision"], "force_play", {"query": "Denied"})
+              async def no_results(query):
+                  return []
+              failed = RoomService(tmp_path / "failed.db", search=no_results, on_action=on_action)
+              other = await failed.create_personal(1)
+              with pytest.raises(RoomError, match="No playable"):
+                  await failed.action(other["id"], 1, "missing", other["revision"], "queue_add", {"query": "Missing"})
+              assert events == []
+          '''
+          x='\n'.join(y[10:] if y.startswith('          ') else y for y in x.splitlines()); t.write_text(body+x)
+          PY
+      - name: Install
+        run: pip install -e '.[dev]' -q
+      - name: Ruff
+        run: ruff check --fix src/parlay/rooms/service.py tests/test_rooms_service.py && ruff format src/parlay/rooms/service.py tests/test_rooms_service.py && ruff check src/parlay/rooms/service.py tests/test_rooms_service.py && ruff format --check src/parlay/rooms/service.py tests/test_rooms_service.py
+      - name: Tests
+        run: pytest -q tests/test_rooms_service.py
+      - name: Types
+        run: mypy src/parlay/rooms/service.py
+      - name: Commit
+        run: |
+          git config user.name "Alex C11"; git config user.email "alex.c992954@gmail.com"
+          git rm .github/workflows/rooms-callback-final-repair.yml
+          git add src/parlay/rooms/service.py tests/test_rooms_service.py
+          git commit -m "fix(rooms): finalize action callback coverage"
+          git push
