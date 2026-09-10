@@ -18,94 +18,114 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg > /dev/null
           python -m pip install -e '.[dev]' -q
-      - name: Apply lifecycle fixes
+      - name: Apply cancellation and generation fixes
         run: |
           python - <<'PY'
           from pathlib import Path
           p = Path('src/parlay/app.py')
           s = p.read_text()
-          def replace(old, new):
-              global s
-              assert old in s, old
-              s = s.replace(old, new, 1)
-          replace('        self._shutting_down = False\n', '        self._shutting_down = False\n        self._activity_jobs: set[asyncio.Task[None]] = set()\n')
-          replace('self.client, self.config.activity_db_path, me.id, self._on_activity_unavailable,', 'self.client, self.config.activity_db_path, me.id, self._queue_activity_unavailable,')
-          replace('await self._on_activity_unavailable(chat_id, "transport_disconnected")', 'await self._queue_activity_unavailable(chat_id, "transport_disconnected")')
-          old = '''        if reason == "media_revoked":
-                      # Admin mute does not mean we left; retain the receive connection.
-                      if self.music is not None and self.music.is_active:
-                          await self.music.pause()
-                      await self._teardown_pipeline()
-                      if self.sessions.active:
-                          self.sessions.disengage_ai()
-                      await self._notify_operator("Parlay was muted by an admin; outgoing playback is paused.")
-                      return
-                  async with self._media_lock:
-                      if chat_id != self._media_chat_id:
-                          return
-                      await self._close_call()
-          '''
+          old = '            except Exception:\n                log.exception("Could not connect media transport for chat %s", chat_id)'
+          new = '''            except asyncio.CancelledError:
+                          await self._close_call()
+                          await bridge.stop()
+                          raise
+                      except Exception:
+                          log.exception("Could not connect media transport for chat %s", chat_id)'''
+          assert old in s
+          s = s.replace(old, new, 1)
+          s = s.replace('await self._on_activity_unavailable(chat_id, reason)\n', 'await self._on_activity_unavailable(chat_id, reason, expected_session=session)\n', 1)
+          old = '    async def _on_activity_unavailable(self, chat_id: int, reason: str) -> None:'
+          new = '''    async def _on_activity_unavailable(
+                  self, chat_id: int, reason: str, *, expected_session: Any = None,
+              ) -> None:'''
+          assert old in s
+          s = s.replace(old, new, 1)
+          old = '        async with self._media_lock:\n            if chat_id != self._media_chat_id:\n                return\n            if reason == "media_revoked":'
           new = '''        async with self._media_lock:
                       if chat_id != self._media_chat_id:
                           return
-                      if reason == "media_revoked":
-                          # Admin mute retains the receive connection.
-                          if self.music is not None and self.music.is_active:
-                              await self.music.pause()
-                          await self._teardown_pipeline()
-                          if self.sessions.active:
-                              self.sessions.disengage_ai()
-                          await self._notify_operator(
-                              "Parlay was muted by an admin; outgoing playback is paused."
-                          )
+                      if expected_session is not None and self.sessions.session is not expected_session:
                           return
-                      await self._close_call()
-          '''
-          replace(old, new)
-          insert = '''    async def _queue_activity_unavailable(self, chat_id: int, reason: str) -> None:
-                  # Never wait for a media operation from a Telegram update handler.
-                  # Capture the session object to reject delayed events after a rejoin.
-                  session = self.sessions.session
-                  if self._shutting_down or session is None or chat_id != self._media_chat_id:
-                      return
-
-                  async def apply() -> None:
-                      if self.sessions.session is not session:
-                          return
-                      try:
-                          await self._on_activity_unavailable(chat_id, reason)
-                      except Exception:
-                          log.exception("Activity cleanup failed for chat %s", chat_id)
-
-                  task = asyncio.create_task(apply(), name="parlay-activity-cleanup")
-                  self._activity_jobs.add(task)
-                  task.add_done_callback(self._activity_jobs.discard)
-
-          '''
-          replace('    async def _on_activity_unavailable(self, chat_id: int, reason: str) -> None:\n', insert + '    async def _on_activity_unavailable(self, chat_id: int, reason: str) -> None:\n')
-          replace('            self.command_wrapper.uninstall()\n', '            for task in tuple(self._activity_jobs):\n                task.cancel()\n            await asyncio.gather(*self._activity_jobs, return_exceptions=True)\n            self.command_wrapper.uninstall()\n')
+                      if reason == "media_revoked":'''
+          assert old in s
+          s = s.replace(old, new, 1)
           p.write_text(s)
-          p = Path('src/parlay/command_wrapper.py')
+          p = Path('src/parlay/audio/bridge.py')
           s = p.read_text()
-          s = s.replace('                reply = await self.commands.dispatch(\n', '                async with asyncio.timeout(90):\n                    reply = await self.commands.dispatch(\n')
-          start = s.index('                    reply = await self.commands.dispatch(')
-          end = s.index('            except FloodWaitError', start)
-          block = s[start:end].splitlines()
-          s = s[:start] + '\n'.join([block[0]] + ['    ' + line for line in block[1:]]) + '\n' + s[end:]
-          p.write_text(s)
-          p = Path('.env.example')
-          s = p.read_text().replace('# Only commands from this identity are acted on.', '# Commands from this identity and the logged-in account are accepted.')
-          s += '\n# Local activity database, separate from Telegram authorization sessions.\n# Docker Compose persists /app/data through the existing ./data mount.\nACTIVITY_DB_PATH=data/parlay.sqlite3\n'
+          old = '        await self._adapter.start(chat)\n        self._active = True'
+          new = '''        try:
+                      await self._adapter.start(chat)
+                  except BaseException:
+                      try:
+                          await self._adapter.stop()
+                      finally:
+                          await self._capture.stop()
+                          self._playback.clear()
+                      raise
+                  self._active = True'''
+          assert old in s
+          p.write_text(s.replace(old, new, 1))
+          p = Path('src/parlay/audio/rawcall.py')
+          s = p.read_text()
+          old = '        app.add_handler(self._handle_update)\n        await app.play('
+          new = '        app.add_handler(self._handle_update)\n        self._app = app  # Keep cleanup possible if play/record fails or is cancelled.\n        await app.play('
+          assert old in s
+          p.write_text(s.replace(old, new, 1))
+          p = Path('tests/test_app_commands.py')
+          s = p.read_text().replace('from types import SimpleNamespace', 'import asyncio\nfrom types import SimpleNamespace', 1)
+          s += '''
+
+          @pytest.mark.asyncio
+          async def test_raw_callback_returns_while_media_lock_held(app):
+              app.vc.resolve = AsyncMock(return_value=channel())
+              await app._cmd_join(ParsedCommand("join", "@music", "7"))
+              app._notify_operator = AsyncMock()
+              async with app._media_lock:
+                  await asyncio.wait_for(
+                      app._queue_activity_unavailable(app._media_chat_id, "call_discarded"), 0.2
+                  )
+                  await asyncio.sleep(0)
+                  assert app.sessions.active
+              await asyncio.gather(*tuple(app._activity_jobs))
+              assert not app.sessions.active
+
+
+          @pytest.mark.asyncio
+          async def test_old_queued_callback_cannot_close_rejoined_session(app):
+              app.vc.resolve = AsyncMock(return_value=channel())
+              await app._cmd_join(ParsedCommand("join", "@music", "7"))
+              chat_id = app._media_chat_id
+              async with app._media_lock:
+                  await app._queue_activity_unavailable(chat_id, "call_discarded")
+                  await asyncio.sleep(0)
+                  app.sessions.end()
+                  app.sessions.begin_join(str(chat_id))
+                  app.sessions.mark_connected()
+              await asyncio.gather(*tuple(app._activity_jobs))
+              assert app.sessions.active
+
+
+          @pytest.mark.asyncio
+          async def test_cancelled_join_rolls_back(app, monkeypatch):
+              app.vc.resolve = AsyncMock(return_value=channel())
+              bridge = Mock(start=AsyncMock(side_effect=asyncio.CancelledError()), stop=AsyncMock())
+              monkeypatch.setattr("parlay.app.RawAudioBridge", lambda *a, **kw: bridge)
+              with pytest.raises(asyncio.CancelledError):
+                  await app._cmd_join(ParsedCommand("join", "@music", "7"))
+              assert not app.sessions.active
+              assert app._media_chat_id is None
+              bridge.stop.assert_awaited()
+          '''
           p.write_text(s)
           PY
-      - name: Format changed Python files
+      - name: Format and commit
         run: |
-          ruff check --fix src/parlay/app.py src/parlay/command_wrapper.py src/parlay/commands.py src/parlay/config.py tests/test_app_commands.py tests/test_command_wrapper.py tests/test_commands.py
-          ruff format src/parlay/app.py src/parlay/command_wrapper.py src/parlay/commands.py src/parlay/config.py tests/test_app_commands.py tests/test_command_wrapper.py tests/test_commands.py
+          ruff check --fix src/parlay/app.py src/parlay/audio/bridge.py src/parlay/audio/rawcall.py tests/test_app_commands.py
+          ruff format src/parlay/app.py src/parlay/audio/bridge.py src/parlay/audio/rawcall.py tests/test_app_commands.py
           git config user.name 'kei'
           git config user.email 'xkailashhh@gmail.com'
-          git add src/parlay/app.py src/parlay/command_wrapper.py src/parlay/commands.py src/parlay/config.py tests/test_app_commands.py tests/test_command_wrapper.py tests/test_commands.py .env.example
-          git diff --cached --quiet || git commit -m 'fix: decouple raw update callbacks from media lifecycle locks'
+          git add src/parlay/app.py src/parlay/audio/bridge.py src/parlay/audio/rawcall.py tests/test_app_commands.py
+          git diff --cached --quiet || git commit -m 'fix: roll back cancelled joins and reject stale cleanup callbacks'
           git push origin HEAD:main
       - name: Verify all code
         run: |
