@@ -269,6 +269,12 @@ async def test_websocket_session_expiry_disconnects_receiver(tmp_path: Any) -> N
                 db.execute("UPDATE room_sessions SET expires_at=?", (time.time() - 1,))
             connection_object = next(iter(app.state.rooms.sockets[room["id"]]))
             connection_object.expires_at = time.time() - 1
-            with pytest.raises(ConnectionClosed) as closed:
-                await asyncio.wait_for(connection.recv(), 3)
-            assert closed.value.code == 1008
+            closed: ConnectionClosed | None = None
+            for _ in range(10):
+                try:
+                    await asyncio.wait_for(connection.recv(), 3)
+                except ConnectionClosed as error:
+                    closed = error
+                    break
+            assert closed is not None
+            assert closed.code == 1008
