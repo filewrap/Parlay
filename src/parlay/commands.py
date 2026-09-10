@@ -1,92 +1,91 @@
-"""Command parsing, operator gating, and dispatch.
-
-The CommandHandler owns the full command set. It parses an incoming message,
-verifies it came from the configured Operator, and routes it to a registered
-handler. Music command handlers are implemented in later work orders; here they
-are registered as not-yet-available so the surface is complete and testable.
-
-Message wording is plain here. A shared presentation layer (WO-10) will style
-output later.
-"""
+"""Command registry, parsing, identity checks, and context-aware dispatch."""
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-log = logging.getLogger(__name__)
-
-# Bot Control commands owned end-to-end by this work order.
 CONTROL_COMMANDS = ("join", "leave", "start", "stop", "status")
-# Music commands: registered and dispatched here; behavior lands in WO-5/WO-6.
 MUSIC_COMMANDS = ("play", "skip", "pause", "resume", "queue")
-
 Handler = Callable[["ParsedCommand"], Awaitable[str]]
 
 
 @dataclass(frozen=True)
 class ParsedCommand:
-    """A parsed operator command."""
+    """An authorized command and its originating Telegram chat."""
 
     name: str
     args: str
     sender_id: str
+    chat_id: int | None = None
+    is_group: bool = False
+    is_channel: bool = False
+
+    def join_target(self) -> str | int | None:
+        """Explicit target wins; otherwise only use the originating group/channel."""
+        if self.args:
+            return int(self.args) if self.args.lstrip("-").isdigit() else self.args
+        if self.is_group or self.is_channel:
+            return self.chat_id
+        return None
 
 
 class CommandHandler:
-    """Parses, gates, and dispatches operator commands."""
+    """Register known commands and ignore unrelated or unauthorized messages."""
 
     def __init__(self, operator_id: str, prefix: str = "/") -> None:
         self._operator_id = str(operator_id)
+        self._account_id: str | None = None
+        self._username: str | None = None
         self._prefix = prefix
         self._handlers: dict[str, Handler] = {}
 
     def set_operator_id(self, operator_id: str) -> None:
-        """Update the gated Operator id.
-
-        The app calls this after resolving a username- or phone-configured
-        Operator to its numeric id, so gating matches the numeric `sender_id`
-        Telethon reports on incoming messages.
-        """
         self._operator_id = str(operator_id)
 
+    def set_account(self, account_id: int, username: str | None = None) -> None:
+        self._account_id = str(account_id)
+        self._username = username.lower() if username else None
+
     def register(self, name: str, handler: Handler) -> None:
-        """Register a handler for a command name."""
-        self._handlers[name] = handler
+        self._handlers[name.lower()] = handler
 
     def is_operator(self, sender_id: object) -> bool:
-        """True only for the configured Operator identity."""
-        if sender_id is None:
-            return False
-        return str(sender_id) == self._operator_id
+        return sender_id is not None and str(sender_id) in (
+            self._operator_id,
+            self._account_id,
+        )
 
     def parse(self, text: str, sender_id: object) -> ParsedCommand | None:
-        """Parse a message into a command, or None if it is not one."""
-        if not text:
-            return None
         stripped = text.strip()
         if not stripped.startswith(self._prefix):
             return None
         body = stripped[len(self._prefix) :]
-        if not body:
+        if not body or body[0].isspace():
             return None
-        head, _, rest = body.partition(" ")
-        return ParsedCommand(name=head.lower(), args=rest.strip(), sender_id=str(sender_id))
+        parts = body.split(maxsplit=1)
+        head = parts[0].lower()
+        if "@" in head:
+            head, recipient = head.split("@", 1)
+            if self._username is None or recipient != self._username:
+                return None
+        if head not in self._handlers:
+            return None
+        return ParsedCommand(head, parts[1].strip() if len(parts) > 1 else "", str(sender_id))
 
-    async def dispatch(self, text: str, sender_id: object) -> str | None:
-        """Parse, operator-gate, and route a message.
-
-        Returns the reply string, or None when the message should be ignored
-        (not a command, or not from the Operator).
-        """
+    async def dispatch(
+        self,
+        text: str,
+        sender_id: object,
+        *,
+        chat_id: int | None = None,
+        is_group: bool = False,
+        is_channel: bool = False,
+    ) -> str | None:
+        if not self.is_operator(sender_id):
+            return None
         command = self.parse(text, sender_id)
         if command is None:
             return None
-        if not self.is_operator(sender_id):
-            log.debug("Ignoring command from non-operator sender %s", sender_id)
-            return None
-        handler = self._handlers.get(command.name)
-        if handler is None:
-            return f"Unknown command: {command.name}"
-        return await handler(command)
+        command = replace(command, chat_id=chat_id, is_group=is_group, is_channel=is_channel)
+        return await self._handlers[command.name](command)
