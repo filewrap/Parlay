@@ -180,6 +180,7 @@ class SocketConnection:
     room_id: str
     user_id: int
     expires_at: float
+    session_hash: str
     outbound: asyncio.Queue[dict[str, Any] | None] = field(
         default_factory=lambda: asyncio.Queue(maxsize=32)
     )
@@ -255,7 +256,7 @@ class GatewayState:
             raise HTTPException(401, "Session expired")
         return digest, user, float(row["expires_at"])
 
-    def consume_ticket(self, ticket: str, room_id: str) -> tuple[dict[str, Any], float] | None:
+    def consume_ticket(self, ticket: str, room_id: str) -> tuple[dict[str, Any], float, str] | None:
         if not ticket or len(ticket) > 256:
             return None
         now = time.time()
@@ -263,7 +264,7 @@ class GatewayState:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
-                """SELECT t.room_id,t.expires_at,t.used_at,s.user_json,
+                """SELECT t.room_id,t.expires_at,t.used_at,t.token_hash,s.user_json,
                           s.expires_at AS session_expiry
                    FROM room_ws_tickets t
                    JOIN room_sessions s ON s.token_hash=t.token_hash
@@ -284,7 +285,7 @@ class GatewayState:
             db.commit()
         assert row is not None
         user = json.loads(row["user_json"])
-        return cast(dict[str, Any], user), float(row["session_expiry"])
+        return cast(dict[str, Any], user), float(row["session_expiry"]), str(row["token_hash"])
 
     def enqueue_room(self, room_id: str, message: dict[str, Any]) -> None:
         for connection in tuple(self.sockets.get(room_id, ())):
@@ -494,7 +495,7 @@ def create_app(
         if consumed is None:
             await websocket.close(1008, "Invalid ticket")
             return
-        user, session_expiry = consumed
+        user, session_expiry, session_hash = consumed
         user_id = int(user["id"])
         try:
             initial = await service.snapshot(room_id, user_id)
@@ -502,7 +503,7 @@ def create_app(
             await websocket.close(1008, "Room access denied")
             return
         await websocket.accept()
-        connection = SocketConnection(websocket, room_id, user_id, session_expiry)
+        connection = SocketConnection(websocket, room_id, user_id, session_expiry, session_hash)
         state.sockets[room_id].add(connection)
         state.presence[room_id][user_id] = {
             "user_id": user_id,
@@ -533,11 +534,20 @@ def create_app(
 
         async def monitor_access() -> None:
             while True:
+                changed = True
                 try:
                     await asyncio.wait_for(service_queue.get(), 0.25)
                 except TimeoutError:
-                    pass
-                if time.time() >= session_expiry:
+                    changed = False
+                with state.connect() as db:
+                    session_row = db.execute(
+                        "SELECT expires_at FROM room_sessions WHERE token_hash=?",
+                        (connection.session_hash,),
+                    ).fetchone()
+                persisted_expiry = (
+                    float(session_row["expires_at"]) if session_row is not None else 0.0
+                )
+                if time.time() >= min(connection.expires_at, persisted_expiry):
                     await websocket.close(1008, "Session expired")
                     return
                 try:
@@ -545,7 +555,7 @@ def create_app(
                 except RoomError:
                     await websocket.close(1008, "Room access revoked")
                     return
-                if not connection.enqueue({"type": "snapshot", "snapshot": current}):
+                if changed and not connection.enqueue({"type": "snapshot", "snapshot": current}):
                     await websocket.close(1013, "Slow client")
                     return
 

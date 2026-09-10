@@ -193,8 +193,12 @@ async def test_real_two_client_cross_updates_movement_kick_and_ticket_replay(tmp
         ):
             await receive_type(first_ws, "snapshot")
             await receive_type(second_ws, "snapshot")
-            presence = await receive_type(first_ws, "presence")
-            assert {item["user_id"] for item in presence["players"]} == {1, 2}
+            for _ in range(4):
+                presence = await receive_type(first_ws, "presence")
+                if {item["user_id"] for item in presence["players"]} == {1, 2}:
+                    break
+            else:
+                pytest.fail("both connected users were not present")
             await asyncio.sleep(0.11)
             await second_ws.send(
                 json.dumps({"type": "move", "x": 1, "z": 0, "rotation": 0, "seq": 1})
