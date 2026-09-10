@@ -298,7 +298,16 @@ class ActivityTracker:
     def _row(row: tuple[Any, ...] | None) -> _Activity | None:
         if row is None:
             return None
-        return _Activity(*row[:5], bool(row[5]), *row[6:])
+        return _Activity(
+            chat_id=int(row[0]),
+            call_id=row[1],
+            access_hash=row[2],
+            call_state=str(row[3]),
+            membership=str(row[4]),
+            transport=bool(row[5]),
+            version=row[6],
+            unavailable_reason=row[7],
+        )
 
     async def _get(self, chat_id: int) -> _Activity | None:
         def operation(connection: sqlite3.Connection) -> _Activity | None:
