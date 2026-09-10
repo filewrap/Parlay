@@ -1,28 +1,8 @@
-"""Adapter over py-tgcalls (pytgcalls org, NTgCalls-based) group calls.
+"""Adapter over py-tgcalls 2.3.x and its NTgCalls 2.x backend.
 
-This is the ONLY module that touches the pytgcalls API surface. Everything
-else in `parlay.audio` is pure Python and unit-tested. The binding is
-imported lazily inside `_load_api()` so the pure-Python core and its tests
-never require the native wheel to be importable.
-
-Verified against py-tgcalls 2.3.x / ntgcalls 2.2.x source:
-    app = PyTgCalls(telethon_client)
-    await app.start()
-    await app.play(chat_id, MediaStream(ExternalMedia.AUDIO, ...))
-        # joins the call with an EXTERNAL audio source; we push frames
-        # ourselves with send_frame().
-    await app.record(chat_id, RecordStream(audio=True, ...))
-        # incoming audio arrives as StreamFrames updates on the asyncio loop.
-    await app.send_frame(chat_id, Device.MICROPHONE, pcm_bytes)
-    app.add_handler(handler)
-    app.remove_handler(handler)
-    await app.leave_call(chat_id)
-
-Unexpected drops surface as a ChatUpdate whose status matches the composite
-flag ChatUpdate.Status.LEFT_CALL (kicked / left / closed / discarded / busy).
-
-Audio boundary: S16LE, 48 kHz, stereo, 10 ms frames (1920 bytes per frame).
-AudioQuality.HIGH is (48000, 2), which is exactly this boundary.
+This is the only module that imports pytgcalls. A single PyTgCalls engine is
+shared by all calls using the same MTProto client. Each adapter owns one chat,
+one update handler, and one paced raw-audio pump.
 """
 
 from __future__ import annotations
@@ -43,19 +23,18 @@ FRAME_BYTES = SAMPLE_RATE * CHANNELS * BYTES_PER_SAMPLE * FRAME_MS // 1000
 
 RecordedHandler = Callable[[bytes, int], None]
 PlayedHandler = Callable[[int], bytes]
-# Fired when the call ends unexpectedly. Runs on the asyncio loop (pytgcalls
-# dispatches updates there); the bridge still marshals defensively.
 DisconnectHandler = Callable[[], None]
 
-# One PyTgCalls engine per Telethon client. Creating a second engine for the
-# same client would re-bind MTProto handlers, so the engine is cached and
-# started exactly once per client.
+# PyTgCalls registers MTProto handlers on its client. Sharing one engine avoids
+# duplicate registration. Startup is protected per client, so unrelated clients
+# never wait for each other's network I/O.
 _apps: dict[int, Any] = {}
 _started: set[int] = set()
+_start_locks: dict[int, asyncio.Lock] = {}
 
 
 def _load_api() -> SimpleNamespace:
-    """Import the py-tgcalls surface lazily and hand back the symbols we use."""
+    """Import the exact py-tgcalls surface used by the raw adapter."""
     from pytgcalls import PyTgCalls
     from pytgcalls.types import (
         AudioQuality,
@@ -82,7 +61,6 @@ def _load_api() -> SimpleNamespace:
 
 
 def _get_app(api: SimpleNamespace, client: Any) -> Any:
-    """Return the cached PyTgCalls engine for this client, creating it once."""
     key = id(client)
     app = _apps.get(key)
     if app is None:
@@ -91,14 +69,20 @@ def _get_app(api: SimpleNamespace, client: Any) -> Any:
     return app
 
 
-class RawCallAdapter:
-    """Joins a group call and moves 10 ms PCM frames in both directions.
+async def _start_app_once(api: SimpleNamespace, client: Any) -> Any:
+    """Start the client's shared engine exactly once under concurrent joins."""
+    key = id(client)
+    lock = _start_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        app = _get_app(api, client)
+        if key not in _started:
+            await app.start()
+            _started.add(key)
+        return app
 
-    Outbound is push-model: a pacing task pulls a frame from `on_played` every
-    10 ms and pushes it with `send_frame`. Inbound `StreamFrames` updates are
-    forwarded to `on_recorded` one frame at a time. A `ChatUpdate` matching
-    `LEFT_CALL` fires `on_disconnect`.
-    """
+
+class RawCallAdapter:
+    """Join one group call and move 10 ms PCM frames in both directions."""
 
     def __init__(
         self,
@@ -118,24 +102,28 @@ class RawCallAdapter:
 
     async def start(self, chat: Any) -> None:
         api = self._api = _load_api()
-        app = _get_app(api, self._client)
-        key = id(self._client)
-        if key not in _started:
-            await app.start()
-            _started.add(key)
+        app = await _start_app_once(api, self._client)
         self._chat_id = await app.resolve_chat_id(chat)
-        app.add_handler(self._handle_update)
-        self._app = app  # Keep cleanup possible if play/record fails or is cancelled.
-        await app.play(
-            self._chat_id,
-            api.MediaStream(api.ExternalMedia.AUDIO, audio_parameters=api.AudioQuality.HIGH),
-        )
-        await app.record(
-            self._chat_id,
-            api.RecordStream(audio=True, audio_parameters=api.AudioQuality.HIGH),
-        )
         self._app = app
-        self._pump_task = asyncio.get_running_loop().create_task(self._pump())
+        app.add_handler(self._handle_update)
+        try:
+            await app.play(
+                self._chat_id,
+                api.MediaStream(
+                    api.ExternalMedia.AUDIO,
+                    audio_parameters=api.AudioQuality.HIGH,
+                ),
+            )
+            await app.record(
+                self._chat_id,
+                api.RecordStream(audio=True, audio_parameters=api.AudioQuality.HIGH),
+            )
+        except BaseException:
+            app.remove_handler(self._handle_update)
+            self._app = None
+            self._chat_id = None
+            raise
+        self._pump_task = asyncio.create_task(self._pump())
         log.info("joined group call %s (external audio in, recording out)", self._chat_id)
 
     async def stop(self) -> None:
@@ -150,16 +138,15 @@ class RawCallAdapter:
                 pass
             self._pump_task = None
         app.remove_handler(self._handle_update)
+        chat_id, self._chat_id = self._chat_id, None
         try:
-            await app.leave_call(self._chat_id)
+            if chat_id is not None:
+                await app.leave_call(chat_id)
         except Exception:
             log.warning("leave_call failed; probably already out of the call", exc_info=True)
-        finally:
-            self._chat_id = None
-            log.info("left group call")
+        log.info("left group call %s", chat_id)
 
     async def _pump(self) -> None:
-        """Push one 10 ms frame per tick, pacing against the loop clock."""
         api = self._api
         assert api is not None
         loop = asyncio.get_running_loop()
@@ -174,7 +161,6 @@ class RawCallAdapter:
             next_at += FRAME_MS / 1000
             delay = next_at - loop.time()
             if delay < 0:
-                # Fell behind (event-loop stall); resync instead of bursting.
                 next_at = loop.time()
                 delay = 0.0
             await asyncio.sleep(delay)

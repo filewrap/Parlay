@@ -1,16 +1,4 @@
-"""MusicProducer: feeds a track's PCM through the Audio Output Arbiter.
-
-The producer is one `AudioProducer` (the other being the AI Voice Pipeline).
-It streams a resolved track through the `MediaTranscoder`, wraps each chunk in
-a `Pcm48kFrame`, and pushes it to the call output through a `PlaybackHandle`
-from the Arbiter, so music and AI never mix (REQ-INJ-006).
-
-Playback is paced to real time: after each chunk the loop sleeps for the
-chunk's duration. A pause gate lets the Arbiter (or the pause command) hold the
-current position by stopping the feed; resume continues the same stream from
-where it stopped (REQ-MUS-005.2/.3). When the stream ends on its own, the
-producer reports completion so the controller can auto-advance (REQ-MUS-004.1).
-"""
+"""Paced PCM music producer with an observable playback cursor."""
 
 from __future__ import annotations
 
@@ -19,19 +7,19 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from ..audio.arbiter import AudioOutputArbiter
-from ..audio.frames import Pcm48kFrame
+from ..audio.frames import CALL_CHANNELS, CALL_RATE, Pcm48kFrame
 from ..media.resolver import ResolvedTrack
 from ..media.track import TranscodeError
 from ..media.transcoder import MediaTranscoder
 
 log = logging.getLogger(__name__)
 
-# Completion reason passed to the on_finished callback.
 CompletionHandler = Callable[["MusicProducer", ResolvedTrack, bool], Awaitable[None]]
+_BYTES_PER_SECOND = CALL_RATE * CALL_CHANNELS * 2
 
 
 class MusicProducer:
-    """Plays one track at a time into the call output via the Arbiter."""
+    """Play one finite track through the per-call output arbiter."""
 
     def __init__(
         self,
@@ -46,10 +34,10 @@ class MusicProducer:
         self._sink = arbiter.handle_for(self)
         self._task: asyncio.Task[None] | None = None
         self._current: ResolvedTrack | None = None
-        # Feed gate: set = play, cleared = paused. Starts open.
         self._gate = asyncio.Event()
         self._gate.set()
         self._paused = False
+        self._sent_bytes = 0
 
     @property
     def current(self) -> ResolvedTrack | None:
@@ -63,28 +51,24 @@ class MusicProducer:
     def is_paused(self) -> bool:
         return self._paused
 
-    async def play(self, track: ResolvedTrack) -> None:
-        """Acquire the call output and begin streaming `track`.
+    @property
+    def position_seconds(self) -> float:
+        """PCM duration accepted by the paced producer for the current track."""
+        return self._sent_bytes / _BYTES_PER_SECOND
 
-        Any track already playing on this producer is stopped first. The
-        Arbiter handover (pausing the AI pipeline if it holds the output) is
-        performed by `acquire` (REQ-MUS-002.3).
-        """
+    async def play(self, track: ResolvedTrack) -> None:
         await self.stop()
         await self._arbiter.acquire(self)
         self._current = track
         self._paused = False
+        self._sent_bytes = 0
         self._gate.set()
         self._task = asyncio.create_task(self._run(track))
 
     async def stop(self) -> None:
-        """Stop the current track and release the call output.
-
-        Used by skip and stop; does not fire the completion callback.
-        """
         task = self._task
         self._task = None
-        if task is not None and not task.done():
+        if task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
             try:
                 await task
@@ -93,28 +77,26 @@ class MusicProducer:
         await self._transcoder.stop()
         self._current = None
         self._paused = False
+        self._sent_bytes = 0
+        self._gate.set()
         await self._arbiter.release(self)
 
-    # --- AudioProducer contract -------------------------------------------
     async def pause(self) -> None:
-        """Hold the current position by closing the feed gate (REQ-MUS-005.2)."""
         self._paused = True
         self._gate.clear()
 
     async def resume(self) -> None:
-        """Continue feeding from the held position (REQ-MUS-005.3)."""
         self._paused = False
         self._gate.set()
 
-    # --- internal feed loop ------------------------------------------------
     async def _run(self, track: ResolvedTrack) -> None:
         completed = False
         try:
             async for chunk in self._transcoder.stream(track.stream.stream_url):
-                await self._gate.wait()  # blocks while paused, holding position
+                await self._gate.wait()
                 frame = Pcm48kFrame(pcm=chunk)
                 self._sink.play_frame(frame)
-                # Pace to real time so the buffer is not flooded and pause holds.
+                self._sent_bytes += len(chunk)
                 await asyncio.sleep(frame.duration_ms / 1000.0)
             completed = True
         except asyncio.CancelledError:
@@ -130,5 +112,7 @@ class MusicProducer:
     async def _finish(self, track: ResolvedTrack) -> None:
         self._current = None
         self._task = None
+        self._paused = False
+        await self._arbiter.release(self)
         if self._on_finished is not None:
             await self._on_finished(self, track, True)

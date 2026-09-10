@@ -1,9 +1,4 @@
-"""Tests for the Music Playback layer (REQ-MUS-001, 002, 004, 005, 006).
-
-These exercise the queue, the controller's command logic and preconditions, and
-the producer's pause/resume gate. The Arbiter, transcoder, and resolver are
-faked, so no yt-dlp, ffmpeg, or Telegram surface is touched.
-"""
+"""Tests for queue, controller snapshots, and the paced music producer."""
 
 from __future__ import annotations
 
@@ -20,8 +15,8 @@ from parlay.music.queue import TrackQueue
 from parlay.session import CallSessionManager
 
 
-def _resolved(title: str) -> ResolvedTrack:
-    track = Track(title=title, query=title)
+def _resolved(title: str, *, url: str | None = None) -> ResolvedTrack:
+    track = Track(title=title, query=title, webpage_url=url, duration_s=12.0)
     stream = StreamSource(source=MediaSource.YOUTUBE, stream_url=f"http://s/{title}")
     return ResolvedTrack(track=track, stream=stream)
 
@@ -41,11 +36,9 @@ class FakeSink:
 
 
 class FakeArbiter:
-    """Records acquire/release and hands out a FakeSink."""
-
     def __init__(self) -> None:
-        self.acquired: list[object] = []
-        self.released: list[object] = []
+        self.acquired = []
+        self.released = []
         self.sink = FakeSink()
 
     async def acquire(self, producer: object) -> None:
@@ -59,38 +52,40 @@ class FakeArbiter:
 
 
 class EmptyTranscoder:
-    """Yields nothing, so a track completes immediately."""
-
     async def stream(self, url: str) -> AsyncIterator[bytes]:
         return
-        yield b""  # pragma: no cover - makes this an async generator
+        yield b""
 
     async def stop(self) -> None:
         pass
 
 
 class BlockingTranscoder:
-    """Yields one tiny chunk then blocks, so the track stays 'playing'."""
-
     def __init__(self) -> None:
         self._release = asyncio.Event()
 
     async def stream(self, url: str) -> AsyncIterator[bytes]:
-        yield b"\x00\x00\x00\x00"
+        yield b"\x00" * 1920
         await self._release.wait()
 
     async def stop(self) -> None:
         self._release.set()
 
 
+class FiniteTranscoder:
+    async def stream(self, url: str) -> AsyncIterator[bytes]:
+        yield b"\x00" * 1920
+
+    async def stop(self) -> None:
+        pass
+
+
 class FakeResolver:
     def __init__(self, *, fail: bool = False) -> None:
-        self._fail = fail
-        self.calls: list[str] = []
+        self.fail = fail
 
     async def resolve(self, request: str) -> ResolvedTrack:
-        self.calls.append(request)
-        if self._fail:
+        if self.fail:
             raise TrackNotFoundError("no match")
         return _resolved(request)
 
@@ -102,146 +97,117 @@ def _connected_sessions() -> CallSessionManager:
     return sessions
 
 
-# --- TrackQueue -----------------------------------------------------------
 def test_queue_enqueue_positions_and_pop_order() -> None:
-    q = TrackQueue()
-    assert q.enqueue(_resolved("a")) == 1
-    assert q.enqueue(_resolved("b")) == 2
-    assert [r.track.title for r in q.pending] == ["a", "b"]
-    assert q.pop_next().track.title == "a"
-    assert q.pop_next().track.title == "b"
-    assert q.pop_next() is None
+    queue = TrackQueue()
+    assert queue.enqueue(_resolved("a")) == 1
+    assert queue.enqueue(_resolved("b")) == 2
+    assert [item.track.title for item in queue.pending] == ["a", "b"]
+    assert queue.pop_next().track.title == "a"
+    assert queue.pop_next().track.title == "b"
+    assert queue.pop_next() is None
 
 
 def test_queue_clear() -> None:
-    q = TrackQueue()
-    q.enqueue(_resolved("a"))
-    q.clear()
-    assert len(q) == 0
+    queue = TrackQueue()
+    queue.enqueue(_resolved("a"))
+    queue.clear()
+    assert len(queue) == 0
 
 
-# --- MusicController preconditions (REQ-MUS-002) --------------------------
-async def test_play_requires_active_session() -> None:
-    controller = MusicController(
-        CallSessionManager(), FakeArbiter(), FakeResolver(), EmptyTranscoder()
-    )
-    reply = await controller.play("a song")
-    assert "Join a voice chat first" in reply
-
-
-async def test_play_requires_connected_session() -> None:
+async def test_play_requires_active_and_connected_session() -> None:
+    controller = MusicController(CallSessionManager(), FakeArbiter(), FakeResolver(), EmptyTranscoder())
+    assert "Join a voice chat first" in await controller.play("song")
     sessions = CallSessionManager()
-    sessions.begin_join("chat")  # connecting, not connected
+    sessions.begin_join("chat")
     controller = MusicController(sessions, FakeArbiter(), FakeResolver(), EmptyTranscoder())
-    reply = await controller.play("a song")
-    assert "not ready" in reply
+    assert "not ready" in await controller.play("song")
 
 
 async def test_play_not_found_leaves_playback_unchanged() -> None:
     controller = MusicController(
         _connected_sessions(), FakeArbiter(), FakeResolver(fail=True), EmptyTranscoder()
     )
-    reply = await controller.play("missing")
-    assert "No result found" in reply
+    assert "No result found" in await controller.play("missing")
     assert not controller.is_active
 
 
-# --- play / enqueue (REQ-MUS-001) -----------------------------------------
-async def test_play_starts_when_idle_then_enqueues() -> None:
-    arbiter = FakeArbiter()
-    controller = MusicController(
-        _connected_sessions(), arbiter, FakeResolver(), BlockingTranscoder()
-    )
-    first = await controller.play("first")
-    assert "Now playing: first" in first
-    assert controller.is_active
-    assert arbiter.acquired  # output was requested through the Arbiter
-    second = await controller.play("second")
-    assert "Queued at #1: second" in second
-    await controller.stop()
-
-
-# --- transport controls (REQ-MUS-005) ------------------------------------
-async def test_controls_report_when_nothing_playing() -> None:
-    controller = MusicController(
-        _connected_sessions(), FakeArbiter(), FakeResolver(), EmptyTranscoder()
-    )
-    for reply in (
-        await controller.skip(),
-        await controller.pause(),
-        await controller.resume(),
-        await controller.stop(),
-    ):
-        assert "Nothing is playing" in reply
-
-
-async def test_pause_resume_toggles_producer() -> None:
+async def test_play_enqueue_pause_resume_stop_snapshots() -> None:
     controller = MusicController(
         _connected_sessions(), FakeArbiter(), FakeResolver(), BlockingTranscoder()
     )
-    await controller.play("song")
-    assert "Paused" in await controller.pause()
-    assert "Already paused" in await controller.pause()
-    assert "Resumed" in await controller.resume()
-    assert "Already playing" in await controller.resume()
+    await controller.play("first")
+    await controller.play("second")
+    snapshot = controller.snapshot()
+    assert snapshot["status"] == "playing"
+    assert snapshot["track"]["source_url"] == "first"
+    assert [item["title"] for item in snapshot["queue"]] == ["second"]
+    await controller.pause()
+    assert controller.snapshot()["status"] == "paused"
+    await controller.resume()
+    assert controller.snapshot()["status"] == "playing"
+    await controller.stop()
+    assert controller.snapshot()["status"] == "idle"
+    assert controller.snapshot()["queue"] == []
+
+
+async def test_snapshot_uses_public_source_and_youtube_id() -> None:
+    class Resolver:
+        async def resolve(self, request):
+            return _resolved("video", url="https://www.youtube.com/watch?v=abcdefghijk")
+
+    controller = MusicController(
+        _connected_sessions(), FakeArbiter(), Resolver(), BlockingTranscoder()
+    )
+    await controller.play("video")
+    track = controller.snapshot()["track"]
+    assert track["source_url"] == "https://www.youtube.com/watch?v=abcdefghijk"
+    assert track["youtube_id"] == "abcdefghijk"
+    assert "http://s/video" not in str(track)
     await controller.stop()
 
 
-async def test_stop_clears_queue_and_returns_to_silence() -> None:
-    arbiter = FakeArbiter()
-    controller = MusicController(
-        _connected_sessions(), arbiter, FakeResolver(), BlockingTranscoder()
-    )
-    await controller.play("a")
-    await controller.play("b")  # queued
-    reply = await controller.stop()
-    assert "Stopped music" in reply
-    assert not controller.is_active
-    assert arbiter.released  # output was released back to the Arbiter
+async def test_finite_end_advances_once_and_emits_callback() -> None:
+    changes = []
 
+    async def changed(snapshot):
+        changes.append(snapshot)
 
-# --- queue view (REQ-MUS-004.3) -------------------------------------------
-async def test_show_queue_lists_playing_and_pending() -> None:
     controller = MusicController(
-        _connected_sessions(), FakeArbiter(), FakeResolver(), BlockingTranscoder()
+        _connected_sessions(), FakeArbiter(), FakeResolver(), FiniteTranscoder(), on_change=changed
     )
     await controller.play("one")
     await controller.play("two")
-    view = await controller.show_queue()
-    assert "Now playing: one" in view
-    assert "two" in view
-    await controller.stop()
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+        if controller.snapshot()["status"] == "idle":
+            break
+    await asyncio.sleep(0)
+    assert controller.snapshot()["status"] == "idle"
+    assert any(snapshot["track"] and snapshot["track"]["title"] == "two" for snapshot in changes)
+    assert changes[-1]["status"] == "idle"
 
 
-# --- MusicProducer gate ---------------------------------------------------
-async def test_producer_pause_gate_and_stop() -> None:
-    arbiter = FakeArbiter()
-    transcoder = BlockingTranscoder()
-    producer = MusicProducer(arbiter, transcoder)
+async def test_producer_cursor_counts_paced_pcm() -> None:
+    producer = MusicProducer(FakeArbiter(), BlockingTranscoder())
     await producer.play(_resolved("x"))
-    assert producer.is_playing
-    await producer.pause()
-    assert producer.is_paused
-    await producer.resume()
-    assert not producer.is_paused
+    for _ in range(10):
+        await asyncio.sleep(0)
+        if producer.position_seconds:
+            break
+    assert producer.position_seconds == pytest.approx(0.01)
     await producer.stop()
-    assert not producer.is_playing
-    assert arbiter.released
 
 
-async def test_producer_completion_fires_callback() -> None:
-    finished: list[str] = []
+async def test_producer_completion_fires_callback_and_releases() -> None:
+    finished = []
+    arbiter = FakeArbiter()
 
-    async def on_finished(prod: MusicProducer, track: ResolvedTrack, ok: bool) -> None:
-        finished.append(track.track.title)
+    async def on_finished(producer, track, ok):
+        finished.append((track.track.title, ok))
 
-    producer = MusicProducer(FakeArbiter(), EmptyTranscoder(), on_finished=on_finished)
+    producer = MusicProducer(arbiter, EmptyTranscoder(), on_finished=on_finished)
     await producer.play(_resolved("done"))
-    # Let the empty stream drain and the completion callback run.
     for _ in range(5):
         await asyncio.sleep(0)
-    assert finished == ["done"]
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])
+    assert finished == [("done", True)]
+    assert arbiter.released
