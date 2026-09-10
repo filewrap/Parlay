@@ -123,7 +123,7 @@ class HybridRanker:
                 loss += math.log1p(math.exp(-margin))
                 steps += 1
 
-        metrics = self._evaluate(
+        metrics: dict[str, Any] = self._evaluate(
             users,
             item_ids,
             user_factors,

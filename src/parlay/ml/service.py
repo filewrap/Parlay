@@ -228,7 +228,9 @@ class CompassService:
                     await asyncio.to_thread(self.train)
                 except Exception:
                     pass
-            if self._deliver and await asyncio.to_thread(self.store.claim_job, "delivery", slot):
+            if self._deliver and await asyncio.to_thread(
+                lambda: self.store.claim_job("delivery", slot)
+            ):
                 await self._deliver_hour()
             try:
                 await asyncio.wait_for(self._stopping.wait(), timeout=60.0)
