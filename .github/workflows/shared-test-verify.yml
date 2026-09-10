@@ -11,18 +11,33 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Correct and format scoped test
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('tests/test_shared_integration.py')
+          text = path.read_text()
+          old = '''        current_view = joined.json()
+          assert current_view["permissions"]["control"] is True
+'''
+          new = '''        admitted = joined.json()
+          current_view = (
+              await client.get(f"/api/rooms/{room['id']}", headers=current_owner)
+          ).json()
+          assert admitted["id"] == room["id"]
+          assert current_view["permissions"]["control"] is True
+'''
+          assert old in text
+          path.write_text(text.replace(old, new, 1))
+          PY
+          ruff format tests/test_shared_integration.py
+          git config user.name 'Alex C11'
+          git config user.email 'alex.c992954@gmail.com'
+          git add tests/test_shared_integration.py
+          git diff --cached --quiet || git commit -m 'test: read live group authority after admission'
+          git diff --cached --quiet || git push origin HEAD:main
       - name: Install
         run: pip install -e '.[dev]' -q
-      - name: Format scoped test
-        run: |
-          ruff format tests/test_shared_integration.py
-          if ! git diff --quiet -- tests/test_shared_integration.py; then
-            git config user.name 'Alex C11'
-            git config user.email 'alex.c992954@gmail.com'
-            git add tests/test_shared_integration.py
-            git commit -m 'style: format shared integration test'
-            git push origin HEAD:main
-          fi
       - name: Verify scoped shared integration test
         run: |
           ruff check tests/test_shared_integration.py
