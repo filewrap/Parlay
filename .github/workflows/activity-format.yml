@@ -4,114 +4,25 @@ name: Activity format helper
   push:
     branches:
       - main
-    paths:
-      - .github/workflows/activity-format.yml
-  workflow_dispatch: {}
 
 permissions:
   contents: write
 
 jobs:
   format:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-      - name: Apply activity lifecycle fixes and tests
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          activity = Path("src/parlay/activity.py")
-          text = activity.read_text()
-          old = '''            current = asyncio.current_task()
-            for task in tasks:
-                if task is not current:
-                    task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-'''
-          new = '''            current = asyncio.current_task()
-            other_tasks = tasks - {current}
-            for task in other_tasks:
-                task.cancel()
-            if other_tasks:
-                await asyncio.gather(*other_tasks, return_exceptions=True)
-'''
-          if old not in text:
-              raise SystemExit("expected stop block not found")
-          activity.write_text(text.replace(old, new, 1))
-
-          tests = Path("tests/test_activity.py")
-          test_text = tests.read_text()
-          addition = '''
-
-async def test_unavailable_callback_can_set_transport_without_deadlock(tmp_path) -> None:
-    client = FakeClient()
-    chat_id = setup_chat(client, 101, 11)
-    client.participants[11] = [participant()]
-    tracker = None
-    callback_done = asyncio.Event()
-
-    async def callback(received_chat_id: int, reason: str) -> None:
-        assert received_chat_id == chat_id
-        assert reason == "call_discarded"
-        assert tracker is not None
-        await tracker.set_transport(chat_id, False)
-        callback_done.set()
-
-    tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
-    await tracker.start()
-    try:
-        update = types.UpdateGroupCall(
-            call=types.GroupCallDiscarded(id=11, access_hash=110, duration=8),
-            chat_id=101,
-        )
-        await asyncio.wait_for(tracker.handle_update(update), timeout=1)
-        assert callback_done.is_set()
-    finally:
-        await tracker.stop()
-
-
-async def test_unavailable_callback_can_stop_from_reconcile_worker(tmp_path) -> None:
-    client = FakeClient()
-    chat_id = setup_chat(client, 101, 11)
-    client.participants[11] = [participant()]
-    callback_done = asyncio.Event()
-    tracker = None
-
-    async def callback(received_chat_id: int, reason: str) -> None:
-        assert received_chat_id == chat_id
-        assert reason == "call_discarded"
-        assert tracker is not None
-        await tracker.stop()
-        callback_done.set()
-
-    tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
-    await tracker.start()
-    client.calls[101] = None
-    tracker._schedule_reconcile(chat_id)
-    await asyncio.wait_for(callback_done.wait(), timeout=1)
-    with pytest.raises(RuntimeError, match="not started"):
-        await tracker.status_text(chat_id)
-    await tracker.stop()
-'''
-          marker = "async def test_unavailable_callback_can_set_transport_without_deadlock"
-          if marker in test_text:
-              raise SystemExit("callback tests already present")
-          tests.write_text(test_text + addition)
-          PY
-      - name: Format owned files
-        run: |
-          python -m pip install "ruff>=0.6" -q
-          ruff format src/parlay/activity.py tests/test_activity.py
-          ruff check src/parlay/activity.py tests/test_activity.py
-      - name: Commit formatted owned files
-        run: |
-          git config user.name "Alex C11"
-          git config user.email "alex.c992954@gmail.com"
+          python-version: '3.11'
+      - run: python -m pip install 'ruff>=0.6' -q
+      - run: ruff format src/parlay/activity.py tests/test_activity.py
+      - run: ruff check src/parlay/activity.py tests/test_activity.py
+      - run: |
+          git config user.name 'Alex C11'
+          git config user.email 'alex.c992954@gmail.com'
           git add src/parlay/activity.py tests/test_activity.py
-          git commit -m "Fix activity tracker callback reentrancy"
+          git diff --cached --quiet || git commit -m 'Format activity tracker files'
           git push
