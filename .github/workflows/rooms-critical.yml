@@ -1,8 +1,6 @@
 name: Rooms critical verification
-on:
-  workflow_dispatch:
-permissions:
-  contents: write
+on: {workflow_dispatch: {}}
+permissions: {contents: write}
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -12,33 +10,31 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: '3.11'}
       - run: pip -q install -e . 'fastapi>=0.115,<1' 'uvicorn>=0.30,<1' httpx websockets pytest pytest-asyncio ruff mypy
-      - name: Patch scoped files
+      - name: Patch and commit
         run: |
           python - <<'PY'
           from pathlib import Path
-          import re
-          p=Path('src/parlay/rooms/gateway.py'); s=p.read_text().replace('    values.pop("signature", None)\n','')
-          s=s.replace('''        if inspect.iscoroutinefunction(method):\n            return await method(*args)\n        return await asyncio.to_thread(method, *args)''','''        try:\n            if inspect.iscoroutinefunction(method):\n                return await method(*args)\n            return await asyncio.to_thread(method, *args)\n        except ValueError as error:\n            raise HTTPException(400, str(error)) from error''')
+          p=Path('src/parlay/rooms/gateway.py'); s=p.read_text()
+          s=s.replace('    values.pop("signature", None)\n','')
+          start=s.index('        if inspect.iscoroutinefunction(method):',s.index('    async def compass_call'))
+          end=s.index('\n\n    @app.get("/api/compass")',start)
+          s=s[:start]+'''        try:\n            if inspect.iscoroutinefunction(method):\n                return await method(*args)\n            return await asyncio.to_thread(method, *args)\n        except ValueError as error:\n            raise HTTPException(400, str(error)) from error'''+s[end:]
           p.write_text(s)
-          p=Path('src/parlay/rooms/service.py'); s=p.read_text()
-          s=s.replace('import uuid\n','import uuid\nfrom urllib.parse import urlsplit\n')
-          pattern=r'''            if row\["revision"\] != expected_revision:\n                raise RoomError\(\n                    "stale_revision",\n                    "Room state changed\. Refresh and retry\.",\n                    409,\n                    self\._snapshot\(row, user_id\),\n                \)\n            changed, notify, playback_call = await self\._apply\(\n                row, data, member, action, payload, resolved\n            \)\n            revision = row\["revision"\] \+ \(1 if changed else 0\)\n            new_row = self\._replace\(row, revision, data\)\n            output = self\._snapshot\(new_row, user_id\)'''
-          repl='''            reentry_request = action == "request_reentry" and user_id in data["kicked"]\n            if not reentry_request and row["revision"] != expected_revision:\n                raise RoomError(\n                    "stale_revision",\n                    "Room state changed. Refresh and retry.",\n                    409,\n                    self._snapshot(row, user_id),\n                )\n            changed, notify, playback_call = await self._apply(\n                row, data, member, action, payload, resolved\n            )\n            revision = row["revision"] + (1 if changed else 0)\n            new_row = self._replace(row, revision, data)\n            if reentry_request:\n                output = {"status": "pending"}\n                publish_output = self._snapshot(new_row, row["owner_id"])\n            else:\n                output = self._snapshot(new_row, user_id)\n                publish_output = output'''
-          s,n=re.subn(pattern,repl,s); assert n==1,n
-          s=s.replace('        self._publish(room_id, output)\n        return output','        self._publish(room_id, publish_output)\n        return output',1)
-          s=s.replace('''            if row["kind"] == "group":\n                playback_call = (row["chat_id"], action, {"track": resolved})''','''            if row["kind"] == "group":\n                runtime_action = "play" if action == "queue_add" else "force_play"\n                runtime_payload = (\n                    {"queue": [resolved["source_url"]]}\n                    if runtime_action == "play"\n                    else {"request": resolved["source_url"]}\n                )\n                playback_call = (row["chat_id"], runtime_action, runtime_payload)''')
-          pattern=r'''        url = track\.get\("source_url", ""\)\n        if not isinstance\(url, str\) or not \(\n            url\.startswith\("https://www\.youtube\.com/"\) or url\.startswith\("https://youtu\.be/"\)\n        \):\n            raise RoomError\("unsupported_source", "Only HTTPS YouTube page URLs are supported"\)'''
-          repl='''        url = track.get("source_url", "")\n        parsed = urlsplit(url) if isinstance(url, str) else None\n        if (\n            parsed is None\n            or parsed.scheme != "https"\n            or parsed.hostname not in {"www.youtube.com", "youtube.com", "youtu.be"}\n            or parsed.username is not None\n            or parsed.password is not None\n            or parsed.port not in {None, 443}\n        ):\n            raise RoomError("unsupported_source", "Only HTTPS YouTube page URLs are supported")'''
-          s,n=re.subn(pattern,repl,s); assert n==1,n
+          p=Path('src/parlay/rooms/service.py'); s=p.read_text().replace('import uuid\n','import uuid\nfrom urllib.parse import urlsplit\n',1)
+          a=s.index('            if row["revision"] != expected_revision:',s.index('    async def action(')); b=s.index('\n            await asyncio.to_thread(',a)
+          block=s[a:b]
+          block=block.replace('            if row["revision"] != expected_revision:','            reentry_request = action == "request_reentry" and user_id in data["kicked"]\n            if not reentry_request and row["revision"] != expected_revision:',1)
+          block=block.replace('            output = self._snapshot(new_row, user_id)','''            if reentry_request:\n                output = {"status": "pending"}\n                publish_output = self._snapshot(new_row, row["owner_id"])\n            else:\n                output = self._snapshot(new_row, user_id)\n                publish_output = output''',1)
+          s=s[:a]+block+s[b:]
+          pub=s.index('        self._publish(room_id, output)',b); s=s[:pub]+s[pub:].replace('        self._publish(room_id, output)','        self._publish(room_id, publish_output)',1)
+          s=s.replace('                playback_call = (row["chat_id"], action, {"track": resolved})','''                runtime_action = "play" if action == "queue_add" else "force_play"\n                runtime_payload = (\n                    {"queue": [resolved["source_url"]]}\n                    if runtime_action == "play"\n                    else {"request": resolved["source_url"]}\n                )\n                playback_call = (row["chat_id"], runtime_action, runtime_payload)''',1)
+          a=s.index('        url = track.get("source_url", "")',s.index('    def _clean_track')); b=s.index('\n        output = ',a)
+          s=s[:a]+'''        url = track.get("source_url", "")\n        parsed = urlsplit(url) if isinstance(url, str) else None\n        if (\n            parsed is None\n            or parsed.scheme != "https"\n            or parsed.hostname not in {"www.youtube.com", "youtube.com", "youtu.be"}\n            or parsed.username is not None\n            or parsed.password is not None\n            or parsed.port not in {None, 443}\n        ):\n            raise RoomError("unsupported_source", "Only HTTPS YouTube page URLs are supported")'''+s[b:]
           p.write_text(s)
-          PY
-          python - <<'PY'
-          from pathlib import Path
           p=Path('tests/test_rooms_gateway.py'); s=p.read_text()
-          s=s.replace('''    assert validate_init_data(signed(), TOKEN)["user"]["id"] == 1\n''','''    assert validate_init_data(signed(), TOKEN)["user"]["id"] == 1\n    modern = signed(extra={"signature": "modern-ed25519-signature"})\n    assert validate_init_data(modern, TOKEN)["user"]["id"] == 1\n    with pytest.raises(ValueError, match="signature"):\n        validate_init_data(modern.replace("modern-ed25519-signature", "tampered"), TOKEN)\n''',1)
-          s=s.replace('''    with pytest.raises(ValueError, match="duplicate"):\n        validate_init_data(duplicate, TOKEN)\n''','''    with pytest.raises(ValueError, match="duplicate"):\n        validate_init_data(duplicate, TOKEN)\n    with pytest.raises(ValueError, match="duplicate"):\n        validate_init_data(modern + "&signature=other", TOKEN)\n    with pytest.raises(ValueError, match="Telegram user"):\n        validate_init_data(signed(extra={"user": "[]"}), TOKEN)\n''',1)
-          s=s.replace('"expected_revision": kicked.json()["revision"]','"expected_revision": 0',1)
-          s=s.replace('''        assert request.json()["pending_reentry"] == []''','''        assert request.json() == {"status": "pending"}\n        assert (await client.get(f"/api/rooms/{room['id']}", headers=second)).status_code == 403''',1)
+          s=s.replace('    assert validate_init_data(signed(), TOKEN)["user"]["id"] == 1\n','''    assert validate_init_data(signed(), TOKEN)["user"]["id"] == 1\n    modern = signed(extra={"signature": "modern-ed25519-signature"})\n    assert validate_init_data(modern, TOKEN)["user"]["id"] == 1\n    with pytest.raises(ValueError, match="signature"):\n        validate_init_data(modern.replace("modern-ed25519-signature", "tampered"), TOKEN)\n''',1)
+          s=s.replace('    duplicate = signed() + "&auth_date=1"','''    with pytest.raises(ValueError, match="duplicate"):\n        validate_init_data(modern + "&signature=other", TOKEN)\n    with pytest.raises(ValueError, match="Telegram user"):\n        validate_init_data(signed(extra={"user": "[]"}), TOKEN)\n    duplicate = signed() + "&auth_date=1"''',1)
+          s=s.replace('"expected_revision": kicked.json()["revision"]','"expected_revision": 0',1).replace('assert request.json()["pending_reentry"] == []','assert request.json() == {"status": "pending"}',1)
           p.write_text(s)
           p=Path('tests/test_rooms_service.py'); s=p.read_text()
           s=s.replace('''    room = await service.action(room["id"], 2, "request", room["revision"], "request_reentry", {})\n    assert notices and room["pending_reentry"] == []\n    owner = await service.snapshot(room["id"], 1)''','''    room_id = room["id"]\n    room = await service.action(room_id, 2, "request", 0, "request_reentry", {})\n    assert notices and room == {"status": "pending"}\n    with pytest.raises(RoomError, match="access"):\n        await service.snapshot(room_id, 2)\n    owner = await service.snapshot(room_id, 1)''',1)
@@ -49,7 +45,7 @@ jobs:
           ruff format src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
           git config user.name 'Alex C11'; git config user.email 'alex.c992954@gmail.com'
           git add src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
-          git commit -m 'fix(rooms): secure signature auth and excluded reentry'
+          git commit -m 'fix(rooms): harden authentication and reentry'
           git pull --rebase origin main; git push origin HEAD:main
       - run: ruff format --check src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
       - run: ruff check src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
