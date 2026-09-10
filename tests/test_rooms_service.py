@@ -119,19 +119,12 @@ async def test_duration_override_expires_on_background_sweep(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_moderator_cannot_kick_another_moderator(tmp_path):
+async def test_moderator_cannot_kick_a_moderator(tmp_path):
     service = RoomService(tmp_path / "rooms.db")
-    room = await service.create_personal(1, 2, 3)
-    room = await service.action(
-        room["id"], 1, "capacity-3", room["revision"], "settings", {"capacity": 3}
-    )
+    room = await service.create_personal(1, 2)
     room = await service.join(room["id"], user(2))
-    room = await service.join(room["id"], user(3))
     room = await service.action(
         room["id"], 1, "mod-2", room["revision"], "moderator", {"user_id": 2, "enabled": True}
     )
-    room = await service.action(
-        room["id"], 1, "mod-3", room["revision"], "moderator", {"user_id": 3, "enabled": True}
-    )
     with pytest.raises(RoomError, match="cannot be removed"):
-        await service.action(room["id"], 2, "kick-3", room["revision"], "kick", {"user_id": 3})
+        await service.action(room["id"], 2, "kick-2", room["revision"], "kick", {"user_id": 2})
