@@ -115,7 +115,9 @@ def test_queue_clear() -> None:
 
 
 async def test_play_requires_active_and_connected_session() -> None:
-    controller = MusicController(CallSessionManager(), FakeArbiter(), FakeResolver(), EmptyTranscoder())
+    controller = MusicController(
+        CallSessionManager(), FakeArbiter(), FakeResolver(), EmptyTranscoder()
+    )
     assert "Join a voice chat first" in await controller.play("song")
     sessions = CallSessionManager()
     sessions.begin_join("chat")
