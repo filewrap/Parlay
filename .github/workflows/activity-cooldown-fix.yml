@@ -13,10 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Add discovery cooldown state
-        run: sed -i '/self._discovery_task.*None/a\        self._last_discovery_at = 0.0' src/parlay/activity.py
-      - name: Add discovery cooldown check
-        run: sed -i '/if self._stopping or not self._started:/a\            return\n        now = time.monotonic()\n        if now - self._last_discovery_at < 0.1:\n            return\n        self._last_discovery_at = now' src/parlay/activity.py
+      - name: Add discovery cooldown
+        run: python -c "from pathlib import Path; p=Path('src/parlay/activity.py'); a=p.read_text().splitlines(); i=next(i for i,x in enumerate(a) if 'self._discovery_task:' in x); a.insert(i+1,'        self._last_discovery_at = 0.0'); j=next(i for i,x in enumerate(a) if x.strip() == 'def _schedule_discovery(self) -> None:'); k=next(i for i in range(j,j+8) if a[i].strip() == 'return'); a[k+1:k+1]=['        now = time.monotonic()','        if now - self._last_discovery_at < 0.1:','            return','        self._last_discovery_at = now']; p.write_text('\\n'.join(a)+'\\n')"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
