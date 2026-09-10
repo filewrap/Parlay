@@ -86,8 +86,10 @@ def build_client(config: Config) -> TelegramClient:
     else:
         # Portable credentials are long URL-safe base64 values. Also reject an
         # overlong filename component, rather than leaking it through SQLite.
-        if not name or len(os.fsencode(Path(name).name)) > 255 or (
-            len(name) >= 300 and re.fullmatch(r"[A-Za-z0-9_=\-]+", name)
+        if (
+            not name
+            or len(os.fsencode(Path(name).name)) > 255
+            or (len(name) >= 300 and re.fullmatch(r"[A-Za-z0-9_=\-]+", name))
         ):
             raise _invalid_session()
         session = name
