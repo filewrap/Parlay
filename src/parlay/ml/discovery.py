@@ -37,7 +37,7 @@ class YouTubeChartCollector:
                 f"{self.ENDPOINT}?{urllib.parse.urlencode(parameters)}",
                 headers={"Accept": "application/json", "User-Agent": "Parlay-Compass/1"},
             )
-            with urllib.request.urlopen(request, timeout=15) as response:  # noqa: S310
+            with urllib.request.urlopen(request, timeout=15) as response:
                 payload = json.load(response)
             for item in payload.get("items", []):
                 video_id = item.get("id")

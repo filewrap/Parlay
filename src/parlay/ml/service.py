@@ -12,7 +12,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .discovery import YouTubeChartCollector
-from .model import HybridRanker, POSITIVE
+from .model import POSITIVE, HybridRanker
 from .store import CompassStore
 
 Delivery = Callable[[str, str, list[dict[str, Any]]], Awaitable[object] | object]
@@ -104,10 +104,10 @@ class CompassService:
         if not rows:
             return []
         collaborative = self.ranker.collaborative_scores(user_id, [row["track_id"] for row in rows])
-        _tracks, events = self.store.training_rows()
+        tracks, events = self.store.training_rows()
         liked = {event["track_id"] for event in events if event["user_id"] == user_id and event["event_type"] in POSITIVE}
         liked_tags: set[str] = set()
-        for row in _tracks:
+        for row in tracks:
             if row["track_id"] in liked:
                 liked_tags.update(json.loads(row["tags_json"]))
         scored: list[tuple[float, Any, str]] = []
