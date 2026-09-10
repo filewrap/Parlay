@@ -509,6 +509,7 @@ class ActivityTracker:
             log.exception("activity unavailable callback failed for chat %s", chat_id)
 
     async def _discover_dialogs(self) -> None:
+        await asyncio.sleep(0)
         semaphore = asyncio.Semaphore(self._DISCOVERY_CONCURRENCY)
         jobs: list[Awaitable[None]] = []
         try:
