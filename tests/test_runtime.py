@@ -34,13 +34,18 @@ class FakeBridge:
         pass
 
 
+class FakeTranscoder:
+    async def stop(self) -> None:
+        pass
+
+
 @pytest.fixture(autouse=True)
 def fake_runtime_bridge(monkeypatch, tmp_path):
     FakeBridge.starts = 0
     monkeypatch.setattr(runtime_module, "RawAudioBridge", FakeBridge)
     monkeypatch.setattr(runtime_module, "SourceSelector", lambda token: object())
     monkeypatch.setattr(runtime_module, "TrackResolver", lambda selector: object())
-    monkeypatch.setattr(runtime_module, "MediaTranscoder", lambda: object())
+    monkeypatch.setattr(runtime_module, "MediaTranscoder", FakeTranscoder)
 
 
 @pytest.fixture
