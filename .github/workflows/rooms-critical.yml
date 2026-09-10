@@ -1,6 +1,11 @@
 name: Rooms focused auth verification
-on: {workflow_dispatch: {}}
-permissions: {contents: write}
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
 jobs:
   verify:
     runs-on: ubuntu-latest
