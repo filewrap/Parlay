@@ -24,29 +24,22 @@ jobs:
 
           model = Path('src/parlay/ml/model.py')
           text = model.read_text()
-          text = text.replace(
-              '        metrics = self._evaluate(\n',
-              '        metrics: dict[str, Any] = self._evaluate(\n',
-              1,
-          )
+          needle = '        metrics = self._evaluate(\n'
+          if needle in text:
+              text = text.replace(needle, '        metrics: dict[str, Any] = self._evaluate(\n', 1)
           model.write_text(text)
 
           service = Path('src/parlay/ml/service.py')
           text = service.read_text()
-          old = '''            if self._deliver and await asyncio.to_thread(
-              self.store.claim_job, "delivery", slot
-          ):
-              await self._deliver_hour()
-          '''
-          new = '''            delivery_claimed = await asyncio.to_thread(
-              self.store.claim_job, "delivery", slot
+          needle = 'await asyncio.to_thread(self.store.claim_job, "delivery", slot)'
+          if needle not in text:
+              raise SystemExit('delivery claim expression not found')
+          text = text.replace(
+              needle,
+              'await asyncio.to_thread(lambda: self.store.claim_job("delivery", slot))',
+              1,
           )
-          if self._deliver is not None and delivery_claimed:
-              await self._deliver_hour()
-          '''
-          if old not in text:
-              raise SystemExit('delivery claim block not found')
-          service.write_text(text.replace(old, new, 1))
+          service.write_text(text)
           PY
           ruff format src/parlay/ml/model.py src/parlay/ml/service.py
           git config user.name 'Alex C11'
