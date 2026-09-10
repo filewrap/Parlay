@@ -135,6 +135,7 @@ async def test_join_leave_and_duplicate_removal_are_deduplicated(tmp_path) -> No
     tracker = ActivityTracker(client, tmp_path / "activity.db", 7, callback)
     await tracker.start()
     try:
+        client.participants[11] = []
         removal = types.UpdateGroupCallParticipants(
             call=types.InputGroupCall(id=11, access_hash=110),
             participants=[participant(left=True)],
@@ -162,7 +163,7 @@ async def test_discard_clears_transport_and_notifies_once(tmp_path) -> None:
         await tracker.set_transport(chat_id, True)
         update = types.UpdateGroupCall(
             call=types.GroupCallDiscarded(id=11, access_hash=110, duration=8),
-            chat_id=101,
+            peer=types.PeerChannel(channel_id=101),
         )
         await tracker.handle_update(update)
         await tracker.handle_update(update)
