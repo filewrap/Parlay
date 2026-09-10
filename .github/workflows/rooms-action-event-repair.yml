@@ -1,0 +1,53 @@
+name: Rooms action event verification repair
+
+on:
+  push:
+    paths:
+      - .github/workflows/rooms-action-event-repair.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Apply bounded changes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          workflow = Path('.github/workflows/rooms-action-event.yml').read_text()
+          script = workflow.split("python - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
+          script = '\n'.join(line[10:] if line.startswith('          ') else line for line in script.splitlines())
+          script = script.replace(
+              '''target = ''' + "'''" + '''        self._publish(room_id, publication)\n    return output\n\nasync def _apply(''' + "'''" + '''\nreplacement = ''' + "'''" + '''        self._publish(room_id, publication)''',
+              '''target = ''' + "'''" + '''        self._publish(room_id, publication)\n    return output\n\n    async def _apply(''' + "'''" + '''\nreplacement = ''' + "'''" + '''        self._publish(room_id, publication)''',
+              1,
+          )
+          script = script.replace("async def _apply('''\nif target", "    async def _apply('''\nif target", 1)
+          exec(compile(script, 'patch', 'exec'))
+          PY
+      - name: Install and verify
+        run: |
+          python -m pip install --upgrade pip -q
+          pip install -e '.[dev]' -q
+          ruff check --fix src/parlay/rooms/service.py tests/test_rooms_service.py
+          ruff format src/parlay/rooms/service.py tests/test_rooms_service.py
+          ruff check src/parlay/rooms/service.py tests/test_rooms_service.py
+          ruff format --check src/parlay/rooms/service.py tests/test_rooms_service.py
+          pytest -q tests/test_rooms_service.py
+          mypy src/parlay/rooms/service.py
+      - name: Commit scoped files and clean runners
+        run: |
+          git config user.name "Alex C11"
+          git config user.email "alex.c992954@gmail.com"
+          git rm .github/workflows/rooms-action-event.yml .github/workflows/rooms-action-event-repair.yml
+          git add src/parlay/rooms/service.py tests/test_rooms_service.py
+          git commit -m "feat(rooms): emit idempotent playback action events"
+          git push
