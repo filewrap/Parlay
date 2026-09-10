@@ -77,12 +77,18 @@ class HybridRanker:
         for _epoch in range(25):
             triples: list[tuple[str, str, str]] = []
             for user, seen in train_positive.items():
-                available = [item for item in item_ids if item not in seen and item != held_out.get(user)]
+                available = [
+                    item for item in item_ids if item not in seen and item != held_out.get(user)
+                ]
                 if not seen or not available:
                     continue
                 explicit = list(negatives.get(user, set()) & set(available))
                 for positive in seen:
-                    negative = explicit[steps % len(explicit)] if explicit else available[int(rng.integers(len(available)))]
+                    negative = (
+                        explicit[steps % len(explicit)]
+                        if explicit
+                        else available[int(rng.integers(len(available)))]
+                    )
                     triples.append((user, positive, negative))
             rng.shuffle(triples)
             for user, positive, negative in triples:
@@ -93,14 +99,27 @@ class HybridRanker:
                 neg_vector = item_factors[j].copy()
                 margin = float(user_vector @ (pos_vector - neg_vector))
                 gradient = 1.0 / (1.0 + math.exp(max(-30.0, min(30.0, margin))))
-                user_factors[u] += learning_rate * (gradient * (pos_vector - neg_vector) - regularization * user_vector)
-                item_factors[i] += learning_rate * (gradient * user_vector - regularization * pos_vector)
-                item_factors[j] += learning_rate * (-gradient * user_vector - regularization * neg_vector)
+                user_factors[u] += learning_rate * (
+                    gradient * (pos_vector - neg_vector) - regularization * user_vector
+                )
+                item_factors[i] += learning_rate * (
+                    gradient * user_vector - regularization * pos_vector
+                )
+                item_factors[j] += learning_rate * (
+                    -gradient * user_vector - regularization * neg_vector
+                )
                 loss += math.log1p(math.exp(-margin))
                 steps += 1
         metrics = self._evaluate(
-            users, item_ids, user_factors, item_factors, user_index, item_index,
-            train_positive, held_out, tracks,
+            users,
+            item_ids,
+            user_factors,
+            item_factors,
+            user_index,
+            item_index,
+            train_positive,
+            held_out,
+            tracks,
         )
         metrics.update({"training_pairs": steps, "bpr_loss": loss / max(1, steps)})
         version = f"bpr-{int(time.time() * 1000)}"
@@ -108,13 +127,22 @@ class HybridRanker:
         self.users, self.items = users, item_ids
         self.user_factors, self.item_factors = user_factors, item_factors
         self.version = version
-        metrics.update({"model_version": version, "duration_seconds": time.perf_counter() - started})
+        metrics.update(
+            {"model_version": version, "duration_seconds": time.perf_counter() - started}
+        )
         return metrics
 
     def _evaluate(
-        self, users: list[str], items: list[str], uf: np.ndarray, itf: np.ndarray,
-        ui: dict[str, int], ii: dict[str, int], seen: dict[str, set[str]],
-        held_out: dict[str, str], tracks: list[Any],
+        self,
+        users: list[str],
+        items: list[str],
+        uf: np.ndarray,
+        itf: np.ndarray,
+        ui: dict[str, int],
+        ii: dict[str, int],
+        seen: dict[str, set[str]],
+        held_out: dict[str, str],
+        tracks: list[Any],
     ) -> dict[str, float]:
         recalls: list[float] = []
         ndcgs: list[float] = []
@@ -125,7 +153,9 @@ class HybridRanker:
             all_tags.update(values)
         for user, target in held_out.items():
             candidates = [item for item in items if item not in seen[user]]
-            ranked = sorted(candidates, key=lambda item: float(uf[ui[user]] @ itf[ii[item]]), reverse=True)[:10]
+            ranked = sorted(
+                candidates, key=lambda item: float(uf[ui[user]] @ itf[ii[item]]), reverse=True
+            )[:10]
             if target in ranked:
                 rank = ranked.index(target) + 1
                 recalls.append(1.0)
@@ -143,16 +173,24 @@ class HybridRanker:
         }
 
     def _publish(
-        self, version: str, users: list[str], items: list[str], uf: np.ndarray,
-        itf: np.ndarray, metrics: dict[str, Any],
+        self,
+        version: str,
+        users: list[str],
+        items: list[str],
+        uf: np.ndarray,
+        itf: np.ndarray,
+        metrics: dict[str, Any],
     ) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         artifact = f"{version}.npz"
         temporary_artifact = self.directory / f".{artifact}.tmp"
         with temporary_artifact.open("wb") as stream:
             np.savez_compressed(
-                stream, users=np.asarray(users, dtype=str), items=np.asarray(items, dtype=str),
-                user_factors=uf, item_factors=itf,
+                stream,
+                users=np.asarray(users, dtype=str),
+                items=np.asarray(items, dtype=str),
+                user_factors=uf,
+                item_factors=itf,
             )
             stream.flush()
             os.fsync(stream.fileno())
@@ -168,5 +206,6 @@ class HybridRanker:
         user = self.user_factors[self.users.index(user_id)]
         return {
             item: float(user @ self.item_factors[self.items.index(item)])
-            for item in item_ids if item in self.items
+            for item in item_ids
+            if item in self.items
         }

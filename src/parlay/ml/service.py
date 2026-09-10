@@ -51,8 +51,12 @@ class CompassService:
             self._task = None
 
     def set_preferences(
-        self, user_id: str, enabled: bool, count: int = 10,
-        quiet_start: int | None = None, quiet_end: int | None = None,
+        self,
+        user_id: str,
+        enabled: bool,
+        count: int = 10,
+        quiet_start: int | None = None,
+        quiet_end: int | None = None,
         timezone: str = "UTC",
     ) -> None:
         user_id = self._required("user_id", user_id)
@@ -70,28 +74,46 @@ class CompassService:
         self.store.set_preferences(user_id, bool(enabled), count, quiet_start, quiet_end, timezone)
 
     def ingest_track(
-        self, track_id: str, title: str, artist: str = "", source_url: str = "",
+        self,
+        track_id: str,
+        title: str,
+        artist: str = "",
+        source_url: str = "",
         tags: list[str] | None = None,
     ) -> None:
         track_id, title = self._required("track_id", track_id), self._required("title", title)
-        if tags is not None and (not isinstance(tags, list) or not all(isinstance(x, str) for x in tags)):
+        if tags is not None and (
+            not isinstance(tags, list) or not all(isinstance(x, str) for x in tags)
+        ):
             raise TypeError("tags must be a list of strings")
         source = "manual"
         rights = "Caller-supplied metadata; the caller is responsible for source and usage rights."
-        self.store.ingest_track(track_id, title, artist.strip(), source_url.strip(), tags or [], source, rights)
+        self.store.ingest_track(
+            track_id, title, artist.strip(), source_url.strip(), tags or [], source, rights
+        )
 
     def record_event(
-        self, user_id: str, track_id: str, event_type: str, event_id: str,
+        self,
+        user_id: str,
+        track_id: str,
+        event_type: str,
+        event_id: str,
         context: dict[str, Any] | None = None,
     ) -> bool:
-        for name, value in (("user_id", user_id), ("track_id", track_id),
-                            ("event_type", event_type), ("event_id", event_id)):
+        for name, value in (
+            ("user_id", user_id),
+            ("track_id", track_id),
+            ("event_type", event_type),
+            ("event_id", event_id),
+        ):
             self._required(name, value)
         if context is not None and not isinstance(context, dict):
             raise TypeError("context must be a dict")
         kind = event_type.strip().lower()
         require_exposure = kind in {"click", "positive", "like", "dislike", "negative"}
-        return self.store.record_event(user_id, track_id, kind, event_id, context or {}, require_exposure)
+        return self.store.record_event(
+            user_id, track_id, kind, event_id, context or {}, require_exposure
+        )
 
     def recommend(self, user_id: str, limit: int = 10) -> list[dict[str, Any]]:
         self._required("user_id", user_id)
@@ -105,7 +127,11 @@ class CompassService:
             return []
         collaborative = self.ranker.collaborative_scores(user_id, [row["track_id"] for row in rows])
         tracks, events = self.store.training_rows()
-        liked = {event["track_id"] for event in events if event["user_id"] == user_id and event["event_type"] in POSITIVE}
+        liked = {
+            event["track_id"]
+            for event in events
+            if event["user_id"] == user_id and event["event_type"] in POSITIVE
+        }
         liked_tags: set[str] = set()
         for row in tracks:
             if row["track_id"] in liked:
@@ -116,26 +142,42 @@ class CompassService:
             content = len(tags & liked_tags) / max(1, len(tags | liked_tags))
             popularity = 1.0 / (1.0 + position)
             if collaborative:
-                score = 0.75 * collaborative.get(row["track_id"], 0.0) + 0.2 * content + 0.05 * popularity
+                score = (
+                    0.75 * collaborative.get(row["track_id"], 0.0)
+                    + 0.2 * content
+                    + 0.05 * popularity
+                )
                 reason = "learned listening and feedback fit"
                 if content > 0:
                     reason += ", with shared metadata tags"
             else:
                 score = 0.8 * content + 0.2 * popularity
-                reason = "cold-start chart fallback" if not liked_tags else "cold-start metadata fit"
+                reason = (
+                    "cold-start chart fallback" if not liked_tags else "cold-start metadata fit"
+                )
             scored.append((score, row, reason))
         selected = sorted(scored, key=lambda value: value[0], reverse=True)[:limit]
-        output = [{
-            "id": row["track_id"], "title": row["title"], "source_url": row["source_url"],
-            "score": float(score), "reason": reason, "model_version": self.ranker.version,
-        } for score, row, reason in selected]
+        output = [
+            {
+                "id": row["track_id"],
+                "title": row["title"],
+                "source_url": row["source_url"],
+                "score": float(score),
+                "reason": reason,
+                "model_version": self.ranker.version,
+            }
+            for score, row, reason in selected
+        ]
         self.store.add_exposures(user_id, [item["id"] for item in output], self.ranker.version)
         return output
 
     def feedback(self, user_id: str, track_id: str, positive: bool, event_id: str) -> bool:
         """Record one like/dislike only when it binds to an unhandled exposure."""
         return self.record_event(
-            user_id, track_id, "positive" if positive else "dislike", event_id,
+            user_id,
+            track_id,
+            "positive" if positive else "dislike",
+            event_id,
             {"source": "recommendation_feedback"},
         )
 
@@ -187,9 +229,13 @@ class CompassService:
                 result = await result
             if result is False or result == "blocked":
                 await asyncio.to_thread(
-                    self.set_preferences, preference["user_id"], False,
-                    preference["recommendation_count"], preference["quiet_start"],
-                    preference["quiet_end"], preference["timezone"],
+                    self.set_preferences,
+                    preference["user_id"],
+                    False,
+                    preference["recommendation_count"],
+                    preference["quiet_start"],
+                    preference["quiet_end"],
+                    preference["timezone"],
                 )
 
     @staticmethod

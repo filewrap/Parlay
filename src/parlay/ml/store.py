@@ -60,8 +60,13 @@ class CompassStore:
             )
 
     def set_preferences(
-        self, user_id: str, enabled: bool, count: int, quiet_start: int | None,
-        quiet_end: int | None, timezone: str,
+        self,
+        user_id: str,
+        enabled: bool,
+        count: int,
+        quiet_start: int | None,
+        quiet_end: int | None,
+        timezone: str,
     ) -> None:
         with self.connect() as db:
             existing = db.execute(
@@ -90,8 +95,14 @@ class CompassStore:
             return list(db.execute("SELECT * FROM preferences WHERE enabled=1 AND paused=0"))
 
     def ingest_track(
-        self, track_id: str, title: str, artist: str, source_url: str,
-        tags: list[str], source: str, rights_note: str,
+        self,
+        track_id: str,
+        title: str,
+        artist: str,
+        source_url: str,
+        tags: list[str],
+        source: str,
+        rights_note: str,
     ) -> None:
         with self.connect() as db:
             db.execute(
@@ -100,12 +111,26 @@ class CompassStore:
                    artist=excluded.artist, source_url=excluded.source_url,
                    tags_json=excluded.tags_json, source=excluded.source,
                    rights_note=excluded.rights_note""",
-                (track_id, title, artist, source_url, json.dumps(tags), source, rights_note, time.time()),
+                (
+                    track_id,
+                    title,
+                    artist,
+                    source_url,
+                    json.dumps(tags),
+                    source,
+                    rights_note,
+                    time.time(),
+                ),
             )
 
     def record_event(
-        self, user_id: str, track_id: str, event_type: str, event_id: str,
-        context: dict[str, Any], require_exposure: bool = False,
+        self,
+        user_id: str,
+        track_id: str,
+        event_type: str,
+        event_id: str,
+        context: dict[str, Any],
+        require_exposure: bool = False,
     ) -> bool:
         with self.connect() as db:
             if not db.execute("SELECT 1 FROM tracks WHERE track_id=?", (track_id,)).fetchone():
@@ -114,7 +139,8 @@ class CompassStore:
             if require_exposure:
                 exposure = db.execute(
                     """SELECT exposure_id, feedback_event_id FROM exposures
-                       WHERE user_id=? AND track_id=?""", (user_id, track_id)
+                       WHERE user_id=? AND track_id=?""",
+                    (user_id, track_id),
                 ).fetchone()
                 if not exposure:
                     raise ValueError("feedback requires an actual recommendation exposure")
@@ -140,28 +166,33 @@ class CompassStore:
                 db.execute(
                     """UPDATE preferences SET dislikes_since_reset=dislikes_since_reset+1,
                        paused=CASE WHEN dislikes_since_reset+1>=5 THEN 1 ELSE paused END
-                       WHERE user_id=?""", (user_id,)
+                       WHERE user_id=?""",
+                    (user_id,),
                 )
             return True
 
     def candidates(self, user_id: str) -> list[sqlite3.Row]:
         with self.connect() as db:
-            return list(db.execute(
-                """SELECT t.* FROM tracks t
+            return list(
+                db.execute(
+                    """SELECT t.* FROM tracks t
                    WHERE NOT EXISTS (SELECT 1 FROM exposures x
                      WHERE x.user_id=? AND x.track_id=t.track_id)
                    AND NOT EXISTS (SELECT 1 FROM events e
                      WHERE e.user_id=? AND e.track_id=t.track_id
                      AND e.event_type IN ('dislike','negative'))
-                   ORDER BY t.discovered_at DESC""", (user_id, user_id)
-            ))
+                   ORDER BY t.discovered_at DESC""",
+                    (user_id, user_id),
+                )
+            )
 
     def add_exposures(self, user_id: str, track_ids: list[str], version: str) -> None:
         now = time.time()
         with self.connect() as db:
             db.executemany(
                 """INSERT OR IGNORE INTO exposures(user_id,track_id,model_version,exposed_at)
-                   VALUES (?,?,?,?)""", [(user_id, item, version, now) for item in track_ids]
+                   VALUES (?,?,?,?)""",
+                [(user_id, item, version, now) for item in track_ids],
             )
 
     def training_rows(self) -> tuple[list[sqlite3.Row], list[sqlite3.Row]]:
@@ -181,7 +212,8 @@ class CompassStore:
     def reset_user(self, user_id: str) -> None:
         with self.connect() as db:
             db.execute(
-                "UPDATE preferences SET dislikes_since_reset=0, paused=0 WHERE user_id=?", (user_id,)
+                "UPDATE preferences SET dislikes_since_reset=0, paused=0 WHERE user_id=?",
+                (user_id,),
             )
             db.execute("DELETE FROM exposures WHERE user_id=?", (user_id,))
 

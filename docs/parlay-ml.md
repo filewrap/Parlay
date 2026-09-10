@@ -10,7 +10,9 @@ from parlay.ml import CompassService
 compass = CompassService(db_path, model_dir, youtube_api_key=None)
 await compass.start(deliver=None)
 await compass.stop()
-compass.set_preferences(user_id, enabled, count=10, quiet_start=None, quiet_end=None, timezone="UTC")
+compass.set_preferences(
+    user_id, enabled, count=10, quiet_start=None, quiet_end=None, timezone="UTC"
+)
 compass.ingest_track(track_id, title, artist="", source_url="", tags=None)
 compass.record_event(user_id, track_id, event_type, event_id, context=None)
 items = compass.recommend(user_id, limit=10)

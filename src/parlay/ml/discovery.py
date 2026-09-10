@@ -28,8 +28,12 @@ class YouTubeChartCollector:
         token: str | None = None
         while len(results) < limit:
             parameters = {
-                "part": "snippet", "chart": "mostPopular", "videoCategoryId": "10",
-                "regionCode": self.region, "maxResults": "50", "key": self.api_key or "",
+                "part": "snippet",
+                "chart": "mostPopular",
+                "videoCategoryId": "10",
+                "regionCode": self.region,
+                "maxResults": "50",
+                "key": self.api_key or "",
             }
             if token:
                 parameters["pageToken"] = token
@@ -44,15 +48,17 @@ class YouTubeChartCollector:
                 snippet = item.get("snippet", {})
                 if not video_id or any(row["track_id"] == video_id for row in results):
                     continue
-                results.append({
-                    "track_id": video_id,
-                    "title": snippet.get("title", "Untitled"),
-                    "artist": snippet.get("channelTitle", ""),
-                    "source_url": f"https://www.youtube.com/watch?v={video_id}",
-                    "tags": [str(tag) for tag in snippet.get("tags", [])[:20]],
-                    "source": "youtube_data_api_v3_music_chart",
-                    "rights_note": "Metadata from the official YouTube Data API; playback and reuse remain subject to YouTube and rightsholder terms.",
-                })
+                results.append(
+                    {
+                        "track_id": video_id,
+                        "title": snippet.get("title", "Untitled"),
+                        "artist": snippet.get("channelTitle", ""),
+                        "source_url": f"https://www.youtube.com/watch?v={video_id}",
+                        "tags": [str(tag) for tag in snippet.get("tags", [])[:20]],
+                        "source": "youtube_data_api_v3_music_chart",
+                        "rights_note": "Metadata from the official YouTube Data API; playback and reuse remain subject to YouTube and rightsholder terms.",
+                    }
+                )
                 if len(results) >= limit:
                     break
             token = payload.get("nextPageToken")

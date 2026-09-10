@@ -87,7 +87,9 @@ def test_ten_thousand_catalog_mechanics_not_quality_claim(tmp_path) -> None:
     compass = service(tmp_path)
     compass.set_preferences("synthetic", True)
     for number in range(10_000):
-        compass.ingest_track(f"item-{number}", f"Synthetic {number}", tags=[f"bucket-{number % 20}"])
+        compass.ingest_track(
+            f"item-{number}", f"Synthetic {number}", tags=[f"bucket-{number % 20}"]
+        )
     result = compass.recommend("synthetic", 10)
     assert len(result) == 10
     assert len({item["id"] for item in result}) == 10
