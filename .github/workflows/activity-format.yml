@@ -1,9 +1,10 @@
 name: Activity format helper
 
 on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/activity-format.yml]
   workflow_dispatch: {}
-  repository_dispatch:
-    types: [activity_format]
 
 permissions:
   contents: write
