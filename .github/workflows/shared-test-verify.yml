@@ -1,6 +1,6 @@
 name: shared-test-verify
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
 permissions:
   contents: write
 jobs:
