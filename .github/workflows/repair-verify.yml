@@ -1,0 +1,115 @@
+name: Repair verification
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/repair-verify.yml']
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg > /dev/null
+          python -m pip install -e '.[dev]' -q
+      - name: Apply lifecycle fixes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/parlay/app.py')
+          s = p.read_text()
+          def replace(old, new):
+              global s
+              assert old in s, old
+              s = s.replace(old, new, 1)
+          replace('        self._shutting_down = False\n', '        self._shutting_down = False\n        self._activity_jobs: set[asyncio.Task[None]] = set()\n')
+          replace('self.client, self.config.activity_db_path, me.id, self._on_activity_unavailable,', 'self.client, self.config.activity_db_path, me.id, self._queue_activity_unavailable,')
+          replace('await self._on_activity_unavailable(chat_id, "transport_disconnected")', 'await self._queue_activity_unavailable(chat_id, "transport_disconnected")')
+          old = '''        if reason == "media_revoked":
+                      # Admin mute does not mean we left; retain the receive connection.
+                      if self.music is not None and self.music.is_active:
+                          await self.music.pause()
+                      await self._teardown_pipeline()
+                      if self.sessions.active:
+                          self.sessions.disengage_ai()
+                      await self._notify_operator("Parlay was muted by an admin; outgoing playback is paused.")
+                      return
+                  async with self._media_lock:
+                      if chat_id != self._media_chat_id:
+                          return
+                      await self._close_call()
+          '''
+          new = '''        async with self._media_lock:
+                      if chat_id != self._media_chat_id:
+                          return
+                      if reason == "media_revoked":
+                          # Admin mute retains the receive connection.
+                          if self.music is not None and self.music.is_active:
+                              await self.music.pause()
+                          await self._teardown_pipeline()
+                          if self.sessions.active:
+                              self.sessions.disengage_ai()
+                          await self._notify_operator(
+                              "Parlay was muted by an admin; outgoing playback is paused."
+                          )
+                          return
+                      await self._close_call()
+          '''
+          replace(old, new)
+          insert = '''    async def _queue_activity_unavailable(self, chat_id: int, reason: str) -> None:
+                  # Never wait for a media operation from a Telegram update handler.
+                  # Capture the session object to reject delayed events after a rejoin.
+                  session = self.sessions.session
+                  if self._shutting_down or session is None or chat_id != self._media_chat_id:
+                      return
+
+                  async def apply() -> None:
+                      if self.sessions.session is not session:
+                          return
+                      try:
+                          await self._on_activity_unavailable(chat_id, reason)
+                      except Exception:
+                          log.exception("Activity cleanup failed for chat %s", chat_id)
+
+                  task = asyncio.create_task(apply(), name="parlay-activity-cleanup")
+                  self._activity_jobs.add(task)
+                  task.add_done_callback(self._activity_jobs.discard)
+
+          '''
+          replace('    async def _on_activity_unavailable(self, chat_id: int, reason: str) -> None:\n', insert + '    async def _on_activity_unavailable(self, chat_id: int, reason: str) -> None:\n')
+          replace('            self.command_wrapper.uninstall()\n', '            for task in tuple(self._activity_jobs):\n                task.cancel()\n            await asyncio.gather(*self._activity_jobs, return_exceptions=True)\n            self.command_wrapper.uninstall()\n')
+          p.write_text(s)
+          p = Path('src/parlay/command_wrapper.py')
+          s = p.read_text()
+          s = s.replace('                reply = await self.commands.dispatch(\n', '                async with asyncio.timeout(90):\n                    reply = await self.commands.dispatch(\n')
+          start = s.index('                    reply = await self.commands.dispatch(')
+          end = s.index('            except FloodWaitError', start)
+          block = s[start:end].splitlines()
+          s = s[:start] + '\n'.join([block[0]] + ['    ' + line for line in block[1:]]) + '\n' + s[end:]
+          p.write_text(s)
+          p = Path('.env.example')
+          s = p.read_text().replace('# Only commands from this identity are acted on.', '# Commands from this identity and the logged-in account are accepted.')
+          s += '\n# Local activity database, separate from Telegram authorization sessions.\n# Docker Compose persists /app/data through the existing ./data mount.\nACTIVITY_DB_PATH=data/parlay.sqlite3\n'
+          p.write_text(s)
+          PY
+      - name: Format changed Python files
+        run: |
+          ruff check --fix src/parlay/app.py src/parlay/command_wrapper.py src/parlay/commands.py src/parlay/config.py tests/test_app_commands.py tests/test_command_wrapper.py tests/test_commands.py
+          ruff format src/parlay/app.py src/parlay/command_wrapper.py src/parlay/commands.py src/parlay/config.py tests/test_app_commands.py tests/test_command_wrapper.py tests/test_commands.py
+          git config user.name 'kei'
+          git config user.email 'xkailashhh@gmail.com'
+          git add src/parlay/app.py src/parlay/command_wrapper.py src/parlay/commands.py src/parlay/config.py tests/test_app_commands.py tests/test_command_wrapper.py tests/test_commands.py .env.example
+          git diff --cached --quiet || git commit -m 'fix: decouple raw update callbacks from media lifecycle locks'
+          git push origin HEAD:main
+      - name: Verify all code
+        run: |
+          ruff check .
+          ruff format --check .
+          mypy
+          pytest -q
