@@ -104,6 +104,6 @@ new = '''    room_id = room["id"]
 assert text.count(old) == 1, text.count(old)
 text = text.replace(old, new, 1)
 request_end = text.index('    owner = await service.snapshot(room_id, 1)')
-tail = text[request_end:]
-tail = tail.replace('room["id"]', 'room_id')
-tests.write_text(text[:request_end] + tail)
+function_end = text.index('\n\n@pytest.mark.asyncio', request_end)
+section = text[request_end:function_end].replace('room["id"]', 'room_id')
+tests.write_text(text[:request_end] + section + text[function_end:])
