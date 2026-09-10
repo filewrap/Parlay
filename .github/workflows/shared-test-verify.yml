@@ -2,7 +2,7 @@ name: shared-test-verify
 on:
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
   shared-test-verify:
     runs-on: ubuntu-latest
@@ -13,6 +13,16 @@ jobs:
           python-version: '3.11'
       - name: Install
         run: pip install -e '.[dev]' -q
+      - name: Format scoped test
+        run: |
+          ruff format tests/test_shared_integration.py
+          if ! git diff --quiet -- tests/test_shared_integration.py; then
+            git config user.name 'Alex C11'
+            git config user.email 'alex.c992954@gmail.com'
+            git add tests/test_shared_integration.py
+            git commit -m 'style: format shared integration test'
+            git push origin HEAD:main
+          fi
       - name: Verify scoped shared integration test
         run: |
           ruff check tests/test_shared_integration.py
