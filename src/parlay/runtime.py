@@ -164,6 +164,7 @@ class RuntimeRegistry:
         self._state_lock = asyncio.Lock()
         self._closed = False
         self._store = _SnapshotStore(getattr(config, "activity_db_path", None))
+        self._callback_tasks: set[asyncio.Task[None]] = set()
 
     def get(self, chat_id: int) -> Runtime | None:
         return self._runtimes.get(chat_id)
@@ -289,8 +290,7 @@ class RuntimeRegistry:
         entity = await self._client.get_entity(chat)
         return entity, int(get_peer_id(entity))
 
-    @staticmethod
-    def _notify(callback: Callable[..., Awaitable[None]] | None, *args: Any) -> None:
+    def _notify(self, callback: Callable[..., Awaitable[None]] | None, *args: Any) -> None:
         if callback is None:
             return
 
@@ -300,7 +300,9 @@ class RuntimeRegistry:
             except Exception:
                 log.exception("runtime observer failed")
 
-        asyncio.create_task(run())
+        task = asyncio.create_task(run())
+        self._callback_tasks.add(task)
+        task.add_done_callback(self._callback_tasks.discard)
 
 
 def _requests(payload: Any) -> Iterable[str]:
