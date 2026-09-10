@@ -1,15 +1,14 @@
-"""Durable, account-local Telegram call activity tracking.
+"""Durable, account-local Telegram voice-chat activity tracking.
 
-The tracker consumes Telethon raw updates but treats them as hints. Participant
-updates are partial and versioned, so gaps are reconciled with a targeted
-``phone.getGroupParticipants`` request for ``InputPeerSelf``. SQLite work runs
-in worker threads and never blocks the event loop used by the audio stack.
+Raw group-call updates are hints, not an exhaustive event stream. Telegram sends
+partial participant updates and version gaps are possible, so this module
+refetches a targeted self snapshot when needed. All SQLite calls run in worker
+threads to keep database I/O off the media event loop.
 """
 
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import sqlite3
 import threading
@@ -23,9 +22,9 @@ from telethon.tl import functions, types
 from telethon.utils import get_peer_id
 
 log = logging.getLogger(__name__)
-
 UnavailableCallback = Callable[[int, str], Awaitable[None]]
 _T = TypeVar("_T")
+_UNSET = object()
 
 
 @dataclass(frozen=True)
@@ -41,11 +40,11 @@ class _Activity:
 
 
 class ActivityTracker:
-    """Track current voice-chat activity for one Telegram account.
+    """Track current call, own participation, and media transport per chat.
 
-    ``on_unavailable`` receives one of ``call_discarded``, ``self_removed``,
-    ``media_revoked``, or ``membership_removed``. It is not called merely
-    because the account is absent from a call it has never joined.
+    ``on_unavailable`` is called with ``call_discarded``, ``self_removed``,
+    ``media_revoked``, or ``membership_removed``. Absence before this account
+    has joined a call does not trigger it.
     """
 
     _RECONCILE_SECONDS = 60.0
@@ -72,42 +71,42 @@ class ActivityTracker:
         self._discovery_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
-        """Open storage, clear stale transport flags, and reconcile Telegram."""
+        """Open storage, clear stale transport, discover calls, and reconcile."""
         async with self._lifecycle_lock:
             if self._started:
                 return
             self._stopping = False
             await asyncio.to_thread(self._open_database)
             await self._execute(
-                "UPDATE activity SET transport = 0, updated_at = ? WHERE account_id = ?",
+                "UPDATE activity SET transport=0, updated_at=? WHERE account_id=?",
                 (int(time.time()), self._account_id),
             )
             self._started = True
-
         await self._discover_dialogs()
         for chat_id in await self._known_active_chats():
             await self._reconcile_safely(chat_id)
         if self._started and not self._stopping:
             self._periodic_task = asyncio.create_task(
-                self._periodic_reconcile(), name="parlay-activity-reconcile"
+                self._periodic_reconcile(), name="parlay-activity-periodic"
             )
 
     async def stop(self) -> None:
-        """Stop workers and close SQLite after all in-flight writes finish."""
+        """Cancel background work and close the database safely."""
         async with self._lifecycle_lock:
             if not self._started and self._connection is None:
                 return
             self._stopping = True
-            tasks = [*self._reconcile_tasks.values()]
+            tasks = set(self._reconcile_tasks.values())
             if self._discovery_task is not None:
-                tasks.append(self._discovery_task)
+                tasks.add(self._discovery_task)
             if self._periodic_task is not None:
-                tasks.append(self._periodic_task)
-            for task in set(tasks):
-                if task is not asyncio.current_task():
+                tasks.add(self._periodic_task)
+            current = asyncio.current_task()
+            for task in tasks:
+                if task is not current:
                     task.cancel()
             if tasks:
-                await asyncio.gather(*set(tasks), return_exceptions=True)
+                await asyncio.gather(*tasks, return_exceptions=True)
             self._reconcile_tasks.clear()
             self._discovery_task = None
             self._periodic_task = None
@@ -116,52 +115,53 @@ class ActivityTracker:
             self._stopping = False
 
     async def handle_update(self, update: Any) -> None:
-        """Apply a raw Telethon update or schedule a bounded reconciliation."""
+        """Consume a raw Telethon update or a Telethon ChatAction event."""
         self._require_started()
         if isinstance(update, types.UpdateGroupCall):
             await self._handle_group_call(update)
-            return
-        if isinstance(update, types.UpdateGroupCallParticipants):
+        elif isinstance(update, types.UpdateGroupCallParticipants):
             await self._handle_participants(update)
-            return
-        if isinstance(update, types.UpdateChannel):
+        elif isinstance(update, types.UpdateChannel):
             self._schedule_reconcile(get_peer_id(types.PeerChannel(update.channel_id)))
-            return
-        if type(update).__name__ == "UpdateChannelParticipant":
+        elif type(update).__name__ == "UpdateChannelParticipant":
             await self._handle_channel_participant(update)
-            return
-        if any(
-            bool(getattr(update, name, False))
-            for name in ("user_added", "user_joined", "user_left", "user_kicked")
+        elif any(
+            bool(getattr(update, field, False))
+            for field in ("user_added", "user_joined", "user_left", "user_kicked")
         ):
             await self._handle_chat_action(update)
 
     async def reconcile(self, chat_id: int) -> None:
-        """Fetch the chat's active call and a trusted targeted self snapshot."""
+        """Fetch a chat's active call and trusted targeted own participant."""
         self._require_started()
         chat_id = self._normalise_chat_id(chat_id)
         try:
             entity = await self._client.get_entity(chat_id)
-            active_call = await self._get_active_call(entity)
-            if active_call is None:
-                previous = await self._get(chat_id)
+            active = await self._get_active_call(entity)
+            previous = await self._get(chat_id)
+            if active is None:
+                was_active = previous is not None and previous.call_state == "active"
                 await self._save(
                     chat_id,
                     call_state="inactive",
-                    membership="left" if previous and previous.membership == "joined" else None,
+                    membership="left",
                     transport=False,
-                    unavailable_reason="call_discarded" if previous and previous.call_state == "active" else None,
+                    unavailable_reason="call_discarded" if was_active else None,
                 )
-                if previous and previous.call_state == "active":
+                if was_active:
                     await self._notify_once(chat_id, "call_discarded", previous)
                 return
-            call = self._as_input_call(active_call)
+            call = self._as_input_call(active)
+            call_changed = previous is not None and previous.call_id not in (None, call.id)
             await self._save(
                 chat_id,
                 call_id=call.id,
                 access_hash=call.access_hash,
                 call_state="active",
-                unavailable_reason=None,
+                membership="unknown" if call_changed else _UNSET,
+                version=None if call_changed else _UNSET,
+                transport=False if call_changed else _UNSET,
+                unavailable_reason=None if call_changed else _UNSET,
             )
             await self._fetch_self(chat_id, call)
         except asyncio.CancelledError:
@@ -171,12 +171,12 @@ class ActivityTracker:
             await self._save(chat_id, call_state="unknown", membership="unknown")
 
     async def set_transport(self, chat_id: int, connected: bool) -> None:
-        """Record native media transport state; it never survives a restart."""
+        """Set native transport state. Connected state is cleared on restart."""
         self._require_started()
         await self._save(self._normalise_chat_id(chat_id), transport=connected)
 
     async def status_text(self, chat_id: int) -> str:
-        """Return a concise current-state summary for command presentation."""
+        """Return concise current activity for command presentation."""
         self._require_started()
         state = await self._get(self._normalise_chat_id(chat_id))
         if state is None:
@@ -191,13 +191,14 @@ class ActivityTracker:
             "left": "account not joined",
             "unknown": "account participation unknown",
         }.get(state.membership, "account participation unknown")
-        transport = "media transport connected" if state.transport else "media transport disconnected"
+        transport = (
+            "media transport connected" if state.transport else "media transport disconnected"
+        )
         return f"{call}; {member}; {transport}."
 
     def _open_database(self) -> None:
         path = Path(self._db_path)
-        if path.parent != Path(""):
-            path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(path, check_same_thread=False)
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA busy_timeout=5000")
@@ -247,24 +248,33 @@ class ActivityTracker:
         self,
         chat_id: int,
         *,
-        call_id: int | None | object = ..., 
-        access_hash: int | None | object = ...,
-        call_state: str | object = ...,
-        membership: str | object = ...,
-        transport: bool | object = ...,
-        version: int | None | object = ...,
-        unavailable_reason: str | None | object = ...,
+        call_id: Any = _UNSET,
+        access_hash: Any = _UNSET,
+        call_state: Any = _UNSET,
+        membership: Any = _UNSET,
+        transport: Any = _UNSET,
+        version: Any = _UNSET,
+        unavailable_reason: Any = _UNSET,
     ) -> None:
         previous = await self._get(chat_id)
-        values = {
-            "call_id": previous.call_id if previous and call_id is ... else None if call_id is ... else call_id,
-            "access_hash": previous.access_hash if previous and access_hash is ... else None if access_hash is ... else access_hash,
-            "call_state": previous.call_state if previous and call_state is ... else "unknown" if call_state is ... else call_state,
-            "membership": previous.membership if previous and membership is ... else "unknown" if membership is ... else membership,
-            "transport": previous.transport if previous and transport is ... else False if transport is ... else transport,
-            "version": previous.version if previous and version is ... else None if version is ... else version,
-            "unavailable_reason": previous.unavailable_reason if previous and unavailable_reason is ... else None if unavailable_reason is ... else unavailable_reason,
-        }
+
+        def value(field: str, supplied: Any, default: Any) -> Any:
+            if supplied is not _UNSET:
+                return supplied
+            return getattr(previous, field) if previous is not None else default
+
+        values = (
+            self._account_id,
+            chat_id,
+            value("call_id", call_id, None),
+            value("access_hash", access_hash, None),
+            value("call_state", call_state, "unknown"),
+            value("membership", membership, "unknown"),
+            int(bool(value("transport", transport, False))),
+            value("version", version, None),
+            value("unavailable_reason", unavailable_reason, None),
+            int(time.time()),
+        )
         await self._execute(
             """
             INSERT INTO activity (
@@ -281,19 +291,14 @@ class ActivityTracker:
                 unavailable_reason=excluded.unavailable_reason,
                 updated_at=excluded.updated_at
             """,
-            (
-                self._account_id,
-                chat_id,
-                values["call_id"],
-                values["access_hash"],
-                values["call_state"],
-                values["membership"],
-                int(bool(values["transport"])),
-                values["version"],
-                values["unavailable_reason"],
-                int(time.time()),
-            ),
+            values,
         )
+
+    @staticmethod
+    def _row(row: tuple[Any, ...] | None) -> _Activity | None:
+        if row is None:
+            return None
+        return _Activity(*row[:5], bool(row[5]), *row[6:])
 
     async def _get(self, chat_id: int) -> _Activity | None:
         def operation(connection: sqlite3.Connection) -> _Activity | None:
@@ -301,11 +306,11 @@ class ActivityTracker:
                 """
                 SELECT chat_id, call_id, access_hash, call_state, membership,
                        transport, version, unavailable_reason
-                FROM activity WHERE account_id = ? AND chat_id = ?
+                FROM activity WHERE account_id=? AND chat_id=?
                 """,
                 (self._account_id, chat_id),
             ).fetchone()
-            return _Activity(*row[:5], bool(row[5]), *row[6:]) if row else None
+            return self._row(row)
 
         return await self._db(operation)
 
@@ -315,11 +320,11 @@ class ActivityTracker:
                 """
                 SELECT chat_id, call_id, access_hash, call_state, membership,
                        transport, version, unavailable_reason
-                FROM activity WHERE account_id = ? AND call_id = ?
+                FROM activity WHERE account_id=? AND call_id=?
                 """,
                 (self._account_id, call_id),
             ).fetchone()
-            return _Activity(*row[:5], bool(row[5]), *row[6:]) if row else None
+            return self._row(row)
 
         return await self._db(operation)
 
@@ -328,7 +333,7 @@ class ActivityTracker:
             rows = connection.execute(
                 """
                 SELECT chat_id FROM activity
-                WHERE account_id = ? AND call_state IN ('active', 'unknown')
+                WHERE account_id=? AND call_state IN ('active', 'unknown')
                 """,
                 (self._account_id,),
             ).fetchall()
@@ -336,15 +341,15 @@ class ActivityTracker:
 
         return await self._db(operation)
 
-    async def _handle_group_call(self, update: Any) -> None:
+    async def _handle_group_call(self, update: types.UpdateGroupCall) -> None:
         call_id = int(update.call.id)
         existing = await self._find_by_call(call_id)
         chat_id = existing.chat_id if existing else self._chat_from_update(update)
         if chat_id is None:
             self._schedule_discovery()
             return
+        previous = await self._get(chat_id)
         if isinstance(update.call, types.GroupCallDiscarded):
-            previous = await self._get(chat_id)
             await self._save(
                 chat_id,
                 call_id=call_id,
@@ -355,19 +360,17 @@ class ActivityTracker:
                 unavailable_reason="call_discarded",
             )
             await self._notify_once(chat_id, "call_discarded", previous)
-            return
-        await self._save(
-            chat_id,
-            call_id=call_id,
-            access_hash=getattr(update.call, "access_hash", None),
-            call_state="active",
-            version=getattr(update.call, "version", None),
-            unavailable_reason=None,
-        )
+        else:
+            await self._save(
+                chat_id,
+                call_id=call_id,
+                access_hash=getattr(update.call, "access_hash", None),
+                call_state="active",
+                version=getattr(update.call, "version", None),
+            )
 
     async def _handle_participants(self, update: types.UpdateGroupCallParticipants) -> None:
-        call_id = int(update.call.id)
-        state = await self._find_by_call(call_id)
+        state = await self._find_by_call(int(update.call.id))
         if state is None:
             self._schedule_discovery()
             return
@@ -378,27 +381,7 @@ class ActivityTracker:
         if own is None:
             await self._save(state.chat_id, version=update.version)
             return
-        if bool(getattr(own, "left", False)):
-            await self._save(
-                state.chat_id,
-                membership="left",
-                transport=False,
-                version=update.version,
-                unavailable_reason="self_removed",
-            )
-            await self._notify_once(state.chat_id, "self_removed", state)
-            return
-        media_revoked = bool(getattr(own, "muted", False)) and not bool(
-            getattr(own, "can_self_unmute", False)
-        )
-        await self._save(
-            state.chat_id,
-            membership="joined",
-            version=update.version,
-            unavailable_reason="media_revoked" if media_revoked else None,
-        )
-        if media_revoked:
-            await self._notify_once(state.chat_id, "media_revoked", state)
+        await self._apply_self(state.chat_id, own, update.version, state)
 
     async def _fetch_self(self, chat_id: int, call: types.InputGroupCall) -> None:
         previous = await self._get(chat_id)
@@ -420,18 +403,28 @@ class ActivityTracker:
             return
         own = next((item for item in result.participants if self._is_self(item)), None)
         version = getattr(result, "version", None)
-        if own is None:
-            was_joined = previous is not None and previous.membership == "joined"
-            await self._save(
-                chat_id,
-                membership="left" if was_joined else "left",
-                version=version,
-                unavailable_reason="self_removed" if was_joined else None,
-            )
-            if was_joined:
-                await self._notify_once(chat_id, "self_removed", previous)
+        if own is not None:
+            await self._apply_self(chat_id, own, version, previous)
             return
-        if bool(getattr(own, "left", False)):
+        was_joined = previous is not None and previous.membership == "joined"
+        await self._save(
+            chat_id,
+            membership="left",
+            version=version,
+            transport=False if was_joined else _UNSET,
+            unavailable_reason="self_removed" if was_joined else _UNSET,
+        )
+        if was_joined:
+            await self._notify_once(chat_id, "self_removed", previous)
+
+    async def _apply_self(
+        self,
+        chat_id: int,
+        participant: Any,
+        version: int | None,
+        previous: _Activity | None,
+    ) -> None:
+        if bool(getattr(participant, "left", False)):
             await self._save(
                 chat_id,
                 membership="left",
@@ -441,8 +434,8 @@ class ActivityTracker:
             )
             await self._notify_once(chat_id, "self_removed", previous)
             return
-        media_revoked = bool(getattr(own, "muted", False)) and not bool(
-            getattr(own, "can_self_unmute", False)
+        media_revoked = bool(getattr(participant, "muted", False)) and not bool(
+            getattr(participant, "can_self_unmute", False)
         )
         await self._save(
             chat_id,
@@ -460,17 +453,17 @@ class ActivityTracker:
         chat_id = get_peer_id(types.PeerChannel(int(update.channel_id)))
         participant = getattr(update, "new_participant", None)
         removed = participant is None or isinstance(participant, types.ChannelParticipantBanned)
-        if removed:
-            previous = await self._get(chat_id)
-            await self._save(
-                chat_id,
-                membership="left",
-                transport=False,
-                unavailable_reason="membership_removed",
-            )
-            await self._notify_once(chat_id, "membership_removed", previous)
-        else:
+        if not removed:
             self._schedule_reconcile(chat_id)
+            return
+        previous = await self._get(chat_id)
+        await self._save(
+            chat_id,
+            membership="left",
+            transport=False,
+            unavailable_reason="membership_removed",
+        )
+        await self._notify_once(chat_id, "membership_removed", previous)
 
     async def _handle_chat_action(self, event: Any) -> None:
         users = await event.get_users() if hasattr(event, "get_users") else []
@@ -481,17 +474,20 @@ class ActivityTracker:
         if raw_chat_id is None:
             return
         chat_id = self._normalise_chat_id(raw_chat_id)
-        if bool(getattr(event, "user_left", False) or getattr(event, "user_kicked", False)):
-            previous = await self._get(chat_id)
-            await self._save(
-                chat_id,
-                membership="left",
-                transport=False,
-                unavailable_reason="membership_removed",
-            )
-            await self._notify_once(chat_id, "membership_removed", previous)
-        else:
+        removed = bool(getattr(event, "user_left", False)) or bool(
+            getattr(event, "user_kicked", False)
+        )
+        if not removed:
             self._schedule_reconcile(chat_id)
+            return
+        previous = await self._get(chat_id)
+        await self._save(
+            chat_id,
+            membership="left",
+            transport=False,
+            unavailable_reason="membership_removed",
+        )
+        await self._notify_once(chat_id, "membership_removed", previous)
 
     async def _notify_once(
         self, chat_id: int, reason: str, previous: _Activity | None
@@ -510,29 +506,37 @@ class ActivityTracker:
             async for dialog in self._client.iter_dialogs():
                 if not bool(getattr(dialog, "is_group", False)):
                     continue
-                entity = dialog.entity
 
-                async def inspect_dialog(item: Any = entity) -> None:
+                async def inspect(entity: Any = dialog.entity) -> None:
                     async with semaphore:
                         try:
-                            call = await self._get_active_call(item)
+                            call = await self._get_active_call(entity)
+                            if call is None:
+                                return
+                            chat_id = get_peer_id(entity)
+                            input_call = self._as_input_call(call)
+                            previous = await self._get(chat_id)
+                            changed = previous is not None and previous.call_id not in (
+                                None,
+                                input_call.id,
+                            )
+                            await self._save(
+                                chat_id,
+                                call_id=input_call.id,
+                                access_hash=input_call.access_hash,
+                                call_state="active",
+                                membership="unknown" if changed else _UNSET,
+                                version=None if changed else _UNSET,
+                                transport=False if changed else _UNSET,
+                                unavailable_reason=None if changed else _UNSET,
+                            )
+                            await self._fetch_self(chat_id, input_call)
+                        except asyncio.CancelledError:
+                            raise
                         except Exception:
-                            log.debug("could not inspect dialog for group call", exc_info=True)
-                            return
-                        if call is None:
-                            return
-                        chat_id = get_peer_id(item)
-                        input_call = self._as_input_call(call)
-                        await self._save(
-                            chat_id,
-                            call_id=input_call.id,
-                            access_hash=input_call.access_hash,
-                            call_state="active",
-                            unavailable_reason=None,
-                        )
-                        await self._fetch_self(chat_id, input_call)
+                            log.debug("could not inspect dialog group call", exc_info=True)
 
-                jobs.append(inspect_dialog())
+                jobs.append(inspect())
             if jobs:
                 await asyncio.gather(*jobs)
         except asyncio.CancelledError:
@@ -545,17 +549,16 @@ class ActivityTracker:
             return
         if self._discovery_task is not None and not self._discovery_task.done():
             return
-
-        async def run() -> None:
-            await self._discover_dialogs()
-
-        self._discovery_task = asyncio.create_task(run(), name="parlay-activity-discovery")
+        self._discovery_task = asyncio.create_task(
+            self._discover_dialogs(), name="parlay-activity-discovery"
+        )
 
     def _schedule_reconcile(self, chat_id: int) -> None:
         if self._stopping or not self._started:
             return
-        task = self._reconcile_tasks.get(chat_id)
-        if task is not None and not task.done():
+        chat_id = self._normalise_chat_id(chat_id)
+        existing = self._reconcile_tasks.get(chat_id)
+        if existing is not None and not existing.done():
             return
 
         async def run() -> None:
@@ -565,17 +568,14 @@ class ActivityTracker:
                 self._reconcile_tasks.pop(chat_id, None)
 
         self._reconcile_tasks[chat_id] = asyncio.create_task(
-            run(), name=f"parlay-activity-chat-{chat_id}"
+            run(), name=f"parlay-activity-{chat_id}"
         )
 
     async def _periodic_reconcile(self) -> None:
-        try:
-            while True:
-                await asyncio.sleep(self._RECONCILE_SECONDS)
-                for chat_id in await self._known_active_chats():
-                    self._schedule_reconcile(chat_id)
-        except asyncio.CancelledError:
-            raise
+        while True:
+            await asyncio.sleep(self._RECONCILE_SECONDS)
+            for chat_id in await self._known_active_chats():
+                self._schedule_reconcile(chat_id)
 
     async def _reconcile_safely(self, chat_id: int) -> None:
         try:
@@ -584,19 +584,18 @@ class ActivityTracker:
             log.warning("activity startup reconciliation failed", exc_info=True)
 
     async def _get_active_call(self, entity: Any) -> Any | None:
-        if isinstance(entity, types.Channel):
-            full = await self._client(functions.channels.GetFullChannelRequest(entity))
+        if isinstance(entity, (types.Channel, types.InputPeerChannel)):
+            result = await self._client(functions.channels.GetFullChannelRequest(entity))
         elif isinstance(entity, types.Chat):
-            full = await self._client(functions.messages.GetFullChatRequest(entity.id))
+            result = await self._client(functions.messages.GetFullChatRequest(entity.id))
+        elif isinstance(entity, types.InputPeerChat):
+            result = await self._client(
+                functions.messages.GetFullChatRequest(entity.chat_id)
+            )
         else:
             input_entity = await self._client.get_input_entity(entity)
-            if isinstance(input_entity, types.InputPeerChannel):
-                full = await self._client(functions.channels.GetFullChannelRequest(input_entity))
-            elif isinstance(input_entity, types.InputPeerChat):
-                full = await self._client(functions.messages.GetFullChatRequest(input_entity.chat_id))
-            else:
-                return None
-        return full.full_chat.call
+            return await self._get_active_call(input_entity)
+        return result.full_chat.call
 
     @staticmethod
     def _as_input_call(call: Any) -> types.InputGroupCall:
@@ -609,9 +608,7 @@ class ActivityTracker:
         if peer is not None:
             return get_peer_id(peer)
         legacy = getattr(update, "chat_id", None)
-        if legacy is None:
-            return None
-        return self._normalise_chat_id(legacy)
+        return None if legacy is None else self._normalise_chat_id(legacy)
 
     @staticmethod
     def _normalise_chat_id(chat_id: int) -> int:
