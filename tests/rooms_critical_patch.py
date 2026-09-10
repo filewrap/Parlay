@@ -43,10 +43,14 @@ new = '''            new_row = self._replace(row, revision, data)
 '''
 assert text.count(old) == 1, text.count(old)
 text = text.replace(old, new, 1)
-old = '        self._publish(room_id, output)\n        return output\n'
-new = '        self._publish(room_id, publication)\n        return output\n'
-assert text.count(old) == 1, text.count(old)
-service.write_text(text.replace(old, new, 1))
+action_start = text.index("    async def action(")
+publish_at = text.index("        self._publish(room_id, output)\n", action_start)
+text = text[:publish_at] + text[publish_at:].replace(
+    "        self._publish(room_id, output)\n",
+    "        self._publish(room_id, publication)\n",
+    1,
+)
+service.write_text(text)
 
 tests = Path("tests/test_rooms_gateway.py")
 text = tests.read_text()
