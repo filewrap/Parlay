@@ -1,0 +1,23 @@
+name: Frontend audit 9c42
+on:
+  workflow_dispatch:
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: Exact audit report
+        run: npm audit --json || true
+      - name: Production audit report
+        run: npm audit --omit=dev --json || true
+      - name: Available direct updates
+        run: npm outdated --json || true
