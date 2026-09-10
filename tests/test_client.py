@@ -59,6 +59,27 @@ def test_build_client_uses_file_session_otherwise(tmp_path) -> None:
     assert not isinstance(client.session, StringSession)
 
 
+def test_build_client_prefers_existing_session_file(tmp_path, monkeypatch) -> None:
+    """A user-supplied .session file wins even if the name could parse oddly."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "parlay.session").write_bytes(b"")
+    client = build_client(_config(session="parlay"))
+    assert not isinstance(client.session, StringSession)
+
+
+def test_build_client_detects_string_session_in_session_value() -> None:
+    """A string session mistakenly set as TELEGRAM_SESSION must not hit sqlite."""
+    client = build_client(_config(session=_valid_string_session()))
+    assert isinstance(client.session, StringSession)
+
+
+def test_build_client_long_garbage_is_not_a_string_session(tmp_path) -> None:
+    """A long non-session value falls through to the file-session path."""
+    path = str(tmp_path / ("x" * 120))
+    client = build_client(_config(session=path))
+    assert not isinstance(client.session, StringSession)
+
+
 class FakeClient:
     def __init__(self, *, authorized: bool) -> None:
         self._authorized = authorized
