@@ -102,11 +102,11 @@ class ActivityTracker:
             if self._periodic_task is not None:
                 tasks.add(self._periodic_task)
             current = asyncio.current_task()
-            for task in tasks:
-                if task is not current:
-                    task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+            other_tasks = tasks - {current}
+            for task in other_tasks:
+                task.cancel()
+            if other_tasks:
+                await asyncio.gather(*other_tasks, return_exceptions=True)
             self._reconcile_tasks.clear()
             self._discovery_task = None
             self._periodic_task = None
