@@ -1,7 +1,8 @@
 """Independent, concurrent per-chat media runtimes.
 
-The registry is intentionally not wired into ParlayApp yet. It owns capacity,
-per-chat lifecycle serialization, generation checks, and callback isolation.
+The parent owns voice-chat discovery and supplies the actual Telegram call ID.
+The registry owns bounded capacity, per-chat lifecycle serialization, generation
+checks, callback isolation, and media cleanup.
 """
 
 from __future__ import annotations
@@ -12,7 +13,6 @@ import json
 import logging
 import socket
 import sqlite3
-import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
 from typing import Any
@@ -33,6 +33,15 @@ log = logging.getLogger(__name__)
 PlaybackCallback = Callable[[int, Snapshot], Awaitable[None]]
 ClosedCallback = Callable[[int, str], Awaitable[None]]
 TransportCallback = Callable[[int, bool], Awaitable[None]]
+_YOUTUBE_HOSTS = frozenset(
+    {
+        "youtube.com",
+        "www.youtube.com",
+        "m.youtube.com",
+        "music.youtube.com",
+        "youtu.be",
+    }
+)
 
 
 class RuntimeCapacityError(RuntimeError):
@@ -40,18 +49,23 @@ class RuntimeCapacityError(RuntimeError):
 
 
 class UnsafeMediaSourceError(ValueError):
-    """Raised when a direct URL resolves to a local or special-use address."""
+    """Raised when a direct URL is outside the public YouTube allowlist."""
 
 
 class Runtime:
-    """All media state for one chat and one registry generation."""
+    """All media state for one chat and one registry generation.
+
+    ``call_id`` is the Telegram ``InputGroupCall.id``. It is ``None`` until the
+    parent binds the ID obtained during its active-call check. It is never a
+    registry-generated correlation ID; ``generation`` provides stale-event
+    protection inside the registry.
+    """
 
     def __init__(
         self,
         *,
         chat_id: int,
         generation: int,
-        call_id: str,
         sessions: CallSessionManager,
         bridge: RawAudioBridge,
         arbiter: AudioOutputArbiter,
@@ -59,7 +73,7 @@ class Runtime:
     ) -> None:
         self.chat_id = chat_id
         self.generation = generation
-        self.call_id = call_id
+        self.call_id: int | None = None
         self.sessions = sessions
         self.bridge = bridge
         self.arbiter = arbiter
@@ -68,18 +82,26 @@ class Runtime:
         self._command_lock = asyncio.Lock()
         self._closed = False
 
+    def bind_call_id(self, call_id: int) -> None:
+        """Bind the actual Telegram call ID supplied by the parent discovery layer."""
+        if isinstance(call_id, bool) or not isinstance(call_id, int) or call_id <= 0:
+            raise ValueError("call_id must be a positive Telegram call identifier")
+        if self.call_id is not None and self.call_id != call_id:
+            raise RuntimeError("runtime is already bound to a different Telegram call")
+        self.call_id = call_id
+
     async def command(self, action: str, payload: Any = None) -> Snapshot:
         async with self._command_lock:
             if self._closed:
                 raise RuntimeError("runtime is closed")
             if action == "play":
                 for request in _requests(payload):
-                    await _reject_private_url(request)
-                    await self.music.play(request)
+                    await _validate_media_request(request)
+                    await self.music.play_checked(request)
             elif action == "force_play":
                 request = _one_request(payload)
-                await _reject_private_url(request)
-                await self.music.force_play(request)
+                await _validate_media_request(request)
+                await self.music.force_play_checked(request)
             elif action == "pause":
                 await self.music.pause()
             elif action == "resume":
@@ -95,15 +117,39 @@ class Runtime:
             return self.music.snapshot()
 
     async def _close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        if self.ai is not None and getattr(self.ai, "engaged", False):
-            await self.ai.disengage()
-        await self.music.on_session_end()
-        await self.bridge.stop()
-        if self.sessions.active:
-            self.sessions.end()
+        """Serialize against commands and attempt every cleanup stage exactly once."""
+        first_error: BaseException | None = None
+        async with self._command_lock:
+            if self._closed:
+                return
+            self._closed = True
+
+            async def cleanup(awaitable: Awaitable[Any], label: str) -> None:
+                nonlocal first_error
+                try:
+                    await awaitable
+                except BaseException as exc:
+                    log.exception("runtime %s cleanup failed during %s", self.chat_id, label)
+                    if first_error is None:
+                        first_error = exc
+
+            if self.ai is not None:
+                await cleanup(self.ai.disengage(), "AI disengage")
+            await cleanup(self.music.on_session_end(), "music stop")
+            await cleanup(self.bridge.stop(), "bridge stop")
+            if self.sessions.active:
+                try:
+                    self.sessions.end()
+                except BaseException as exc:
+                    log.exception("runtime %s cleanup failed during session end", self.chat_id)
+                    if first_error is None:
+                        first_error = exc
+
+        # Playback observers can re-enter the runtime. Wait only after releasing
+        # the command lock, where they fail promptly against the closed state.
+        await self.music.wait_for_observer()
+        if first_error is not None:
+            raise first_error
 
 
 class _SnapshotStore:
@@ -170,6 +216,7 @@ class RuntimeRegistry:
         return self._runtimes.get(chat_id)
 
     async def join(self, chat: int | Any) -> Runtime:
+        """Join media transport; the parent must check that the voice chat is active."""
         if self._closed:
             raise RuntimeError("registry is closed")
         entity, chat_id = await self._resolve(chat)
@@ -214,29 +261,48 @@ class RuntimeRegistry:
         return await runtime.command(action, payload)
 
     async def leave(self, chat_id: int, reason: str = "left") -> None:
+        cleanup_error: BaseException | None = None
+        removed = False
         lock = self._locks.setdefault(chat_id, asyncio.Lock())
         async with lock:
             runtime = self._runtimes.get(chat_id)
             if runtime is None:
                 return
             generation = runtime.generation
-            await runtime._close()
-            async with self._state_lock:
-                current = self._runtimes.get(chat_id)
-                if current is not None and current.generation == generation:
-                    self._runtimes.pop(chat_id, None)
-                    removed = True
-                else:
-                    removed = False
+            try:
+                await runtime._close()
+            except BaseException as exc:
+                cleanup_error = exc
+            finally:
+                async with self._state_lock:
+                    current = self._runtimes.get(chat_id)
+                    if current is not None and current.generation == generation:
+                        self._runtimes.pop(chat_id, None)
+                        removed = True
         if removed:
+            # Terminal observers are scheduled only after all lifecycle locks are
+            # released and after the runtime is absent from the registry.
             self._notify(self._on_transport, chat_id, False)
             self._notify(self._on_closed, chat_id, reason)
+        if cleanup_error is not None:
+            raise cleanup_error
 
     async def close(self) -> None:
         async with self._state_lock:
             self._closed = True
             chat_ids = list(self._runtimes)
-        await asyncio.gather(*(self.leave(chat_id, "registry_closed") for chat_id in chat_ids))
+        results = await asyncio.gather(
+            *(self.leave(chat_id, "registry_closed") for chat_id in chat_ids),
+            return_exceptions=True,
+        )
+        await self._wait_for_callbacks()
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if errors:
+            raise ExceptionGroup("one or more runtimes failed to close", errors)
+
+    async def _wait_for_callbacks(self) -> None:
+        while self._callback_tasks:
+            await asyncio.gather(*tuple(self._callback_tasks), return_exceptions=True)
 
     async def _build(self, entity: Any, chat_id: int, generation: int) -> Runtime:
         sessions = CallSessionManager()
@@ -277,7 +343,6 @@ class RuntimeRegistry:
         return Runtime(
             chat_id=chat_id,
             generation=generation,
-            call_id=uuid.uuid4().hex,
             sessions=sessions,
             bridge=bridge,
             arbiter=arbiter,
@@ -321,18 +386,19 @@ def _one_request(payload: Any) -> str:
     return value
 
 
-async def _reject_private_url(request: str) -> None:
-    """Reject direct media URLs that resolve to loopback or private networks."""
+async def _validate_media_request(request: str) -> None:
+    """Allow search text and public HTTPS YouTube URLs only."""
     parsed = urlsplit(request.strip())
-    if parsed.scheme not in {"http", "https"}:
+    if not parsed.scheme and not parsed.netloc:
         return
-    if not parsed.hostname:
-        raise UnsafeMediaSourceError("media URL has no host")
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.scheme != "https" or hostname not in _YOUTUBE_HOSTS:
+        raise UnsafeMediaSourceError("direct media URLs must use an allowed HTTPS YouTube host")
     try:
-        addresses = [ipaddress.ip_address(parsed.hostname)]
+        addresses = [ipaddress.ip_address(hostname)]
     except ValueError:
         loop = asyncio.get_running_loop()
-        infos = await loop.getaddrinfo(parsed.hostname, parsed.port, type=socket.SOCK_STREAM)
+        infos = await loop.getaddrinfo(hostname, parsed.port, type=socket.SOCK_STREAM)
         addresses = list({ipaddress.ip_address(info[4][0]) for info in infos})
     if not addresses or any(not address.is_global for address in addresses):
         raise UnsafeMediaSourceError("media URL resolves to a non-public address")

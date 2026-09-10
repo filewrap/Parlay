@@ -25,6 +25,10 @@ ChangeObserver = Callable[[Snapshot], Awaitable[None]]
 _YOUTUBE_ID = re.compile(r"(?:v=|youtu\.be/|/shorts/)([A-Za-z0-9_-]{11})")
 
 
+class MusicCommandError(RuntimeError):
+    """Raised by checked controller APIs when playback cannot be attempted."""
+
+
 class MusicController:
     """Drive one call's finite, non-repeating queue."""
 
@@ -47,7 +51,6 @@ class MusicController:
         self._lock = asyncio.Lock()
         self._observer_task: asyncio.Task[None] | None = None
         self._pending_snapshot: Snapshot | None = None
-        self._observer_wakeup = asyncio.Event()
 
     @property
     def is_active(self) -> bool:
@@ -67,17 +70,22 @@ class MusicController:
         }
 
     async def play(self, request: str) -> str:
-        precondition = self._check_ready()
-        if precondition is not None:
-            return precondition
-        if not request.strip():
-            return fmt.error("Give a song name or link to play.")
+        """Compatibility API for Telegram commands, returning formatted errors."""
         try:
-            resolved = await self._resolver.resolve(request)
+            return await self.play_checked(request)
+        except MusicCommandError as exc:
+            return fmt.error(str(exc))
         except TrackNotFoundError:
             return fmt.warning(f"No result found for {request!r}. Nothing was changed.")
         except MediaError as exc:
             return fmt.error(f"Could not resolve that track: {exc}")
+
+    async def play_checked(self, request: str) -> str:
+        """Play or enqueue, propagating resolution failures to API callers."""
+        self._require_ready()
+        if not request.strip():
+            raise TrackNotFoundError("empty play request")
+        resolved = await self._resolver.resolve(request)
         async with self._lock:
             if self._producer.current is None:
                 await self._start(resolved)
@@ -89,15 +97,22 @@ class MusicController:
             return reply
 
     async def force_play(self, request: str) -> str:
-        precondition = self._check_ready()
-        if precondition is not None:
-            return precondition
+        """Compatibility API for Telegram commands, returning formatted errors."""
         try:
-            resolved = await self._resolver.resolve(request)
+            return await self.force_play_checked(request)
+        except MusicCommandError as exc:
+            return fmt.error(str(exc))
         except TrackNotFoundError:
             return fmt.warning(f"No result found for {request!r}. Nothing was changed.")
         except MediaError as exc:
             return fmt.error(f"Could not resolve that track: {exc}")
+
+    async def force_play_checked(self, request: str) -> str:
+        """Replace playback, propagating resolution failures to API callers."""
+        self._require_ready()
+        if not request.strip():
+            raise TrackNotFoundError("empty play request")
+        resolved = await self._resolver.resolve(request)
         async with self._lock:
             await self._producer.stop()
             await self._start(resolved)
@@ -160,17 +175,23 @@ class MusicController:
 
     async def on_session_end(self) -> None:
         async with self._lock:
-            await self._producer.stop()
-            self._queue.clear()
-            self._changed()
+            try:
+                await self._producer.stop()
+            finally:
+                self._queue.clear()
+                self._changed()
 
-    def _check_ready(self) -> str | None:
+    async def wait_for_observer(self) -> None:
+        task = self._observer_task
+        if task is not None and task is not asyncio.current_task():
+            await asyncio.gather(task, return_exceptions=True)
+
+    def _require_ready(self) -> None:
         session = self._sessions.session
         if session is None:
-            return fmt.error("Join a voice chat first.")
+            raise MusicCommandError("Join a voice chat first.")
         if session.state is not ConnectionState.CONNECTED:
-            return fmt.error("The call is not ready yet.")
-        return None
+            raise MusicCommandError("The call is not ready yet.")
 
     async def _start(self, resolved: ResolvedTrack) -> None:
         await self._producer.play(resolved)
@@ -192,14 +213,12 @@ class MusicController:
         if self._on_change is None:
             return
         self._pending_snapshot = self.snapshot()
-        self._observer_wakeup.set()
         if self._observer_task is None or self._observer_task.done():
             self._observer_task = asyncio.create_task(self._deliver_changes())
 
     async def _deliver_changes(self) -> None:
         while self._pending_snapshot is not None:
             snapshot, self._pending_snapshot = self._pending_snapshot, None
-            self._observer_wakeup.clear()
             try:
                 assert self._on_change is not None
                 await self._on_change(snapshot)
