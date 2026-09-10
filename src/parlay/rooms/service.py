@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import inspect
 import json
+import logging
 import math
 import os
 import sqlite3
@@ -15,11 +16,15 @@ import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 Playback = Callable[[int, str, dict[str, Any]], Awaitable[dict[str, Any] | None]]
 Check = Callable[[int, int], Awaitable[bool] | bool]
 Reentry = Callable[[int, str, int], Awaitable[object] | object]
 Search = Callable[[str], Awaitable[list[dict[str, Any]]]]
+ActionEvent = Callable[[str, int, str, dict[str, Any], str], Awaitable[object]]
+
+log = logging.getLogger(__name__)
 
 
 class RoomError(RuntimeError):
@@ -42,6 +47,7 @@ class RoomService:
         member: Check | None = None,
         on_reentry: Reentry | None = None,
         search: Search | None = None,
+        on_action: ActionEvent | None = None,
     ) -> None:
         self.db_path = str(db_path)
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -50,6 +56,7 @@ class RoomService:
         self.member = member
         self.on_reentry = on_reentry
         self.search = search
+        self.on_action = on_action
         self._locks: dict[str, asyncio.Lock] = {}
         self._listeners: dict[str, set[asyncio.Queue]] = {}
         self._expiry_task: asyncio.Task | None = None
@@ -379,6 +386,12 @@ class RoomService:
             if inspect.isawaitable(reentry_result):
                 await reentry_result
         self._publish(room_id, publication)
+        if resolved is not None and action in {"queue_add", "force_play"} and self.on_action:
+            event_id = f"{room_id}:{user_id}:{action_id}"
+            try:
+                await self.on_action(room_id, user_id, action, self._action_track(resolved), event_id)
+            except Exception:
+                log.exception("room action callback failed", extra={"event_id": event_id})
         return output
 
     async def _apply(self, row, data, actor, action, payload, resolved):
@@ -634,6 +647,26 @@ class RoomService:
             },
         }
 
+@staticmethod
+def _action_track(track: dict[str, Any]) -> dict[str, Any]:
+candidate = track.get("youtube_id")
+valid = isinstance(candidate, str) and len(candidate) == 11 and all(
+    char.isalnum() or char in "-_" for char in candidate
+)
+if not valid:
+    parsed = urlsplit(track["source_url"])
+    candidate = (
+        parsed.path.strip("/").split("/", 1)[0]
+        if parsed.netloc.lower() in {"youtu.be", "www.youtu.be"}
+        else parse_qs(parsed.query).get("v", [""])[0]
+    )
+if not isinstance(candidate, str) or len(candidate) != 11 or not all(
+    char.isalnum() or char in "-_" for char in candidate
+):
+    raise RoomError("invalid_track", "Search returned an invalid YouTube track")
+output = dict(track)
+output["youtube_id"] = candidate
+return output
     @staticmethod
     def _clean_track(track: dict) -> dict:
         if (
