@@ -184,16 +184,45 @@ class RoomService:
             row = await asyncio.to_thread(self._load, room_id)
             self._publish(room_id, self._snapshot(row, None))
 
-    async def publish_playback(self, chat_id: int, snapshot: dict) -> None:
+    async def set_recovering(self, chat_id: int, reason: str) -> None:
+        """Mark an active group room as recovering after a transient media failure."""
         room_id = await asyncio.to_thread(self._group_id, chat_id)
         if not room_id:
             return
         async with self._lock(room_id):
             row = await asyncio.to_thread(self._load, room_id)
+            self._active(row)
+            reason = str(reason)[:200]
+            if row["state"] == "recovering" and row["end_reason"] == reason:
+                return
+            revision = row["revision"] + 1
+            await asyncio.to_thread(
+                self._save_status, room_id, revision, self._data(row), "recovering", reason
+            )
+            output = await self._snapshot_for(
+                self._replace(row, revision, self._data(row), "recovering"), row["owner_id"]
+            )
+        self._publish(room_id, output)
+
+    async def publish_playback(self, chat_id: int, snapshot: dict) -> None:
+        """Publish an actual registry snapshot and mark a recovering group active."""
+        room_id = await asyncio.to_thread(self._group_id, chat_id)
+        if not room_id:
+            return
+        actual = self._clean_playback(snapshot)
+        async with self._lock(room_id):
+            row = await asyncio.to_thread(self._load, room_id)
+            self._active(row)
             data = self._data(row)
-            data["playback"] = self._clean_playback(snapshot)
-            await asyncio.to_thread(self._save, room_id, row["revision"] + 1, data)
-            output = await self.snapshot(room_id, row["owner_id"])
+            duplicate = self._playback_anchor(data["playback"]) == self._playback_anchor(actual)
+            if duplicate and row["state"] == "active":
+                return
+            data["playback"] = actual
+            revision = row["revision"] + 1
+            await asyncio.to_thread(self._save_status, room_id, revision, data, "active", None)
+            output = await self._snapshot_for(
+                self._replace(row, revision, data, "active"), row["owner_id"]
+            )
         self._publish(room_id, output)
 
     async def join(self, room_id: str, user: dict, password: str = "") -> dict:
@@ -246,7 +275,7 @@ class RoomService:
             raise RoomError("access_revoked", "Room access was revoked", 403)
         if row["kind"] == "group" and not await self._check(self.member, user_id, row["chat_id"]):
             raise RoomError("not_group_member", "Telegram group membership is required", 403)
-        return self._snapshot(row, user_id)
+        return await self._snapshot_for(row, user_id)
 
     async def action(
         self,
@@ -266,27 +295,24 @@ class RoomService:
                 [expected_revision, action, payload], sort_keys=True, separators=(",", ":")
             ).encode()
         ).hexdigest()
-        replay = await asyncio.to_thread(self._replay, room_id, user_id, action_id)
-        if replay:
-            if not hmac.compare_digest(replay["digest"], digest):
-                raise RoomError(
-                    "action_id_reused", "action_id was already used for another request", 409
-                )
-            return json.loads(replay["snapshot_json"])
-        resolved = None
-        if action in {"queue_add", "force_play"}:
-            query = payload.get("query")
-            if not isinstance(query, str) or not query.strip() or len(query) > 500:
-                raise RoomError("invalid_query", "query must be a non-empty string")
-            if not self.search:
-                raise RoomError("search_unsupported", "Media search is not configured", 501)
-            tracks = await self.search(query.strip())
-            if not tracks:
-                raise RoomError("track_not_found", "No playable track was found", 404)
-            resolved = self._clean_track(tracks[0])
         notify: tuple[int, str, int] | None = None
-        playback_call: tuple[int, str, dict] | None = None
         async with self._lock(room_id):
+            row = await asyncio.to_thread(self._load, room_id)
+            self._active(row)
+            data = self._data(row)
+            member = next((m for m in data["members"] if m["user_id"] == user_id), None)
+            reentry_request = (
+                action == "request_reentry" and user_id in data["kicked"] and not member
+            )
+            if row["kind"] == "group" and not await self._check(
+                self.member, user_id, row["chat_id"]
+            ):
+                raise RoomError("not_group_member", "Telegram group membership is required", 403)
+            if not member and reentry_request:
+                member = {"user_id": user_id, "role": "participant"}
+            if not member or (user_id in data["kicked"] and not reentry_request):
+                raise RoomError("access_revoked", "Room access is not active", 403)
+
             replay = await asyncio.to_thread(self._replay, room_id, user_id, action_id)
             if replay:
                 if not hmac.compare_digest(replay["digest"], digest):
@@ -294,34 +320,47 @@ class RoomService:
                         "action_id_reused", "action_id was already used for another request", 409
                     )
                 return json.loads(replay["snapshot_json"])
-            row = await asyncio.to_thread(self._load, room_id)
-            self._active(row)
-            data = self._data(row)
-            member = next((m for m in data["members"] if m["user_id"] == user_id), None)
-            reentry_request = (
-                action == "request_reentry" and user_id in data["kicked"] and member is None
-            )
-            if reentry_request:
-                member = {"user_id": user_id, "role": "participant"}
-            if not member or (user_id in data["kicked"] and not reentry_request):
-                raise RoomError("access_revoked", "Room access is not active", 403)
-            if not reentry_request and row["revision"] != expected_revision:
+            if row["revision"] != expected_revision and not reentry_request:
                 raise RoomError(
                     "stale_revision",
                     "Room state changed. Refresh and retry.",
                     409,
-                    self._snapshot(row, user_id),
+                    await self._snapshot_for(row, user_id),
                 )
+
+            resolved = None
+            if action in {"queue_add", "force_play"}:
+                query = payload.get("query")
+                if not isinstance(query, str) or not query.strip() or len(query) > 500:
+                    raise RoomError("invalid_query", "query must be a non-empty string")
+                if not self.search:
+                    raise RoomError("search_unsupported", "Media search is not configured", 501)
+                tracks = await self.search(query.strip())
+                if not tracks:
+                    raise RoomError("track_not_found", "No playable track was found", 404)
+                resolved = self._clean_track(tracks[0])
+
             changed, notify, playback_call = await self._apply(
                 row, data, member, action, payload, resolved
             )
+            if playback_call:
+                if not self.playback:
+                    raise RoomError("playback_unavailable", "Group playback is not configured", 503)
+                actual = await self.playback(*playback_call)
+                if not actual:
+                    raise RoomError(
+                        "playback_unavailable", "Group playback did not confirm the action", 503
+                    )
+                data["playback"] = self._clean_playback(actual)
+
             revision = row["revision"] + (1 if changed else 0)
-            new_row = self._replace(row, revision, data)
+            state = "active" if playback_call else data.get("force_state", row["state"])
+            new_row = self._replace(row, revision, data, state)
             if reentry_request:
                 output = {"status": "pending"}
-                publication = self._snapshot(new_row, row["owner_id"])
+                publication = await self._snapshot_for(new_row, row["owner_id"])
             else:
-                output = self._snapshot(new_row, user_id)
+                output = await self._snapshot_for(new_row, user_id)
                 publication = output
             await asyncio.to_thread(
                 self._commit_action,
@@ -333,12 +372,8 @@ class RoomService:
                 digest,
                 output,
                 changed,
+                state,
             )
-        if playback_call and self.playback:
-            result = await self.playback(*playback_call)
-            if result:
-                await self.publish_playback(playback_call[0], result)
-                output = await self.snapshot(room_id, user_id)
         if notify and self.on_reentry:
             reentry_result = self.on_reentry(*notify)
             if inspect.isawaitable(reentry_result):
@@ -348,15 +383,16 @@ class RoomService:
 
     async def _apply(self, row, data, actor, action, payload, resolved):
         uid, role = actor["user_id"], actor["role"]
-        owner = uid == row["owner_id"]
+        personal_owner = row["kind"] == "personal" and uid == row["owner_id"]
         moderator = role == "moderator"
         settings = data["settings"]
-        authority = owner
+        authority = personal_owner
         if row["kind"] == "group":
             authority = await self._check(self.authority, uid, row["chat_id"])
+        privileged = authority if row["kind"] == "group" else personal_owner
         notify = playback_call = None
         if action == "settings":
-            if not authority:
+            if not privileged:
                 raise RoomError("owner_lock", "Only the room authority can change settings", 403)
             allowed = {
                 "capacity",
@@ -409,11 +445,13 @@ class RoomService:
                     )
                 data["expires_override"] = row["created_at"] + duration
         elif action in {"queue_add", "force_play"}:
-            if not (owner or moderator or settings["queue_all"]):
+            if not (privileged or moderator or settings["queue_all"]):
                 raise RoomError("queue_forbidden", "Queue changes are restricted", 403)
-            if settings["owner_lock"] and not owner and row["kind"] == "personal":
+            if settings["owner_lock"] and not personal_owner and row["kind"] == "personal":
                 raise RoomError("owner_lock", "Owner Lock is enabled", 403)
-            if action == "queue_add" and data["playback"]["track"]:
+            if row["kind"] == "group":
+                playback_call = (row["chat_id"], action, {"track": resolved})
+            elif action == "queue_add" and data["playback"]["track"]:
                 data["playback"]["queue"].append(resolved)
             else:
                 data["playback"].update(
@@ -424,42 +462,51 @@ class RoomService:
                         "server_time": time.time(),
                     }
                 )
-            if row["kind"] == "group":
-                playback_call = (row["chat_id"], action, {"track": resolved})
         elif action in {"pause", "resume", "skip"}:
-            if not (owner or moderator or (settings["queue_all"] and not settings["owner_lock"])):
+            if not (
+                privileged or moderator or (settings["queue_all"] and not settings["owner_lock"])
+            ):
                 raise RoomError("control_forbidden", "Playback controls are restricted", 403)
-            pb = self._timeline(data["playback"])
-            if action == "pause":
-                pb["status"] = "paused"
-            elif action == "resume" and pb["track"]:
-                pb["status"] = "playing"
-                pb["server_time"] = time.time()
-            else:
-                pb["track"] = pb["queue"].pop(0) if pb["queue"] else None
-                pb["status"] = "playing" if pb["track"] else "idle"
-                pb["position_seconds"], pb["server_time"] = 0.0, time.time()
-            data["playback"] = pb
             if row["kind"] == "group":
                 playback_call = (row["chat_id"], action, {})
+            else:
+                pb = self._timeline(data["playback"])
+                if action == "pause":
+                    pb["status"] = "paused"
+                elif action == "resume" and pb["track"]:
+                    pb["status"] = "playing"
+                    pb["server_time"] = time.time()
+                else:
+                    pb["track"] = pb["queue"].pop(0) if pb["queue"] else None
+                    pb["status"] = "playing" if pb["track"] else "idle"
+                    pb["position_seconds"], pb["server_time"] = 0.0, time.time()
+                data["playback"] = pb
         elif action == "kick":
             target = self._target(payload)
             target_member = next(
                 (item for item in data["members"] if item["user_id"] == target), None
             )
-            protected_moderator = (
-                moderator
-                and target_member is not None
-                and target_member["role"] in {"owner", "moderator"}
+            target_authority = row["kind"] == "group" and await self._check(
+                self.authority, target, row["chat_id"]
             )
-            if not (owner or moderator) or target == row["owner_id"] or protected_moderator:
+            protected = (
+                moderator
+                and not privileged
+                and target_member is not None
+                and (target_member["role"] in {"owner", "moderator"} or target_authority)
+            )
+            if (
+                not (privileged or moderator)
+                or (row["kind"] == "personal" and target == row["owner_id"])
+                or protected
+            ):
                 raise RoomError("moderation_forbidden", "This member cannot be removed", 403)
             data["members"] = [m for m in data["members"] if m["user_id"] != target]
             if target not in data["kicked"]:
                 data["kicked"].append(target)
             data["pending_reentry"] = [x for x in data["pending_reentry"] if x != target]
         elif action == "moderator":
-            if not owner or row["kind"] != "personal":
+            if not personal_owner:
                 raise RoomError(
                     "moderation_forbidden", "Only the personal room owner can delegate", 403
                 )
@@ -475,8 +522,10 @@ class RoomService:
                 data["pending_reentry"].append(uid)
                 notify = (row["owner_id"], row["id"], uid)
         elif action == "approve_reentry":
-            if not owner:
-                raise RoomError("owner_required", "Only the owner can approve re-entry", 403)
+            if not privileged:
+                raise RoomError(
+                    "owner_required", "Only the room authority can approve re-entry", 403
+                )
             target = self._target(payload)
             if target not in data["pending_reentry"]:
                 raise RoomError("request_not_found", "No pending re-entry request", 404)
@@ -485,17 +534,14 @@ class RoomService:
             if target not in data["invited"]:
                 data["invited"].append(target)
         elif action == "leave":
-            if owner and row["kind"] == "personal":
-                row = dict(row)
-                row["state"] = "ended"
+            if personal_owner:
                 data["force_state"] = "ended"
             else:
                 data["members"] = [m for m in data["members"] if m["user_id"] != uid]
         elif action == "close":
-            if row["kind"] == "group" and not authority:
-                raise RoomError("group_authority_required", "Group authority is required", 403)
-            if row["kind"] == "personal" and not owner:
-                raise RoomError("owner_required", "Only the owner can close the room", 403)
+            if not privileged:
+                code = "group_authority_required" if row["kind"] == "group" else "owner_required"
+                raise RoomError(code, "Room authority is required", 403)
             data["force_state"] = "ended"
         elif action == "appearance":
             for key in ("avatar", "outfit"):
@@ -525,17 +571,23 @@ class RoomService:
                 except asyncio.QueueFull:
                     pass
 
-    def _snapshot(self, row, user_id: int | None) -> dict:
+    async def _snapshot_for(self, row, user_id: int | None) -> dict:
+        group_authority = False
+        if row["kind"] == "group" and user_id is not None:
+            group_authority = await self._check(self.authority, user_id, row["chat_id"])
+        return self._snapshot(row, user_id, group_authority)
+
+    def _snapshot(self, row, user_id: int | None, group_authority: bool = False) -> dict:
         data, pb = self._data(row), self._timeline(self._data(row)["playback"])
         role = next((m["role"] for m in data["members"] if m["user_id"] == user_id), None)
-        owner = user_id == row["owner_id"]
-        authority = owner
+        personal_owner = row["kind"] == "personal" and user_id == row["owner_id"]
+        authority = group_authority if row["kind"] == "group" else personal_owner
         settings = dict(data["settings"])
         settings["password_required"] = bool(data["password_hash"])
         expires = data.get("expires_override", row["expires_at"])
         state = data.get("force_state", row["state"])
-        can_shared = owner or role == "moderator"
-        if row["kind"] == "personal" and settings["owner_lock"] and not owner:
+        can_shared = authority or role == "moderator"
+        if row["kind"] == "personal" and settings["owner_lock"] and not personal_owner:
             can_shared = False
         return {
             "id": row["id"],
@@ -547,14 +599,14 @@ class RoomService:
             "expires_at": expires,
             "settings": settings,
             "members": [{k: v for k, v in m.items() if v is not None} for m in data["members"]],
-            "pending_reentry": list(data["pending_reentry"]) if owner else [],
+            "pending_reentry": list(data["pending_reentry"]) if authority else [],
             "playback": pb,
             "permissions": {
                 "manage_settings": authority,
                 "queue": can_shared or settings["queue_all"],
-                "control": can_shared,
+                "control": can_shared or (settings["queue_all"] and not settings["owner_lock"]),
                 "moderate": can_shared,
-                "close": owner if row["kind"] == "personal" else authority,
+                "close": authority,
             },
         }
 
@@ -729,15 +781,18 @@ class RoomService:
                 (room_id, user_id, action_id),
             ).fetchone()
 
-    def _commit_action(self, room_id, revision, data, user_id, action_id, digest, output, changed):
+    def _commit_action(
+        self, room_id, revision, data, user_id, action_id, digest, output, changed, state
+    ):
         with self._connect() as db:
             if changed:
                 db.execute(
-                    "UPDATE rooms SET revision=?,data_json=?,state=COALESCE(?,state) WHERE id=?",
+                    "UPDATE rooms SET revision=?,data_json=?,state=?,end_reason=? WHERE id=?",
                     (
                         revision,
                         json.dumps(data, separators=(",", ":")),
-                        data.get("force_state"),
+                        state,
+                        None if state == "active" else data.get("end_reason"),
                         room_id,
                     ),
                 )
@@ -752,6 +807,22 @@ class RoomService:
                     time.time(),
                 ),
             )
+
+    def _save_status(self, room_id, revision, data, state, reason):
+        with self._connect() as db:
+            db.execute(
+                "UPDATE rooms SET revision=?,data_json=?,state=?,end_reason=? WHERE id=?",
+                (revision, json.dumps(data, separators=(",", ":")), state, reason, room_id),
+            )
+
+    @staticmethod
+    def _playback_anchor(playback):
+        return {
+            "track": playback.get("track"),
+            "status": playback.get("status"),
+            "position_seconds": playback.get("position_seconds", 0),
+            "queue": playback.get("queue", []),
+        }
 
     def _expire_due(self):
         now = time.time()
@@ -787,10 +858,12 @@ class RoomService:
         return json.loads(row["data_json"])
 
     @staticmethod
-    def _replace(row, revision, data):
+    def _replace(row, revision, data, state=None):
         result = dict(row)
         result["revision"] = revision
         result["data_json"] = json.dumps(data)
-        if data.get("force_state"):
+        if state is not None:
+            result["state"] = state
+        elif data.get("force_state"):
             result["state"] = data["force_state"]
         return result

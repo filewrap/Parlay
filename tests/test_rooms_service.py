@@ -132,3 +132,135 @@ async def test_moderator_cannot_kick_a_moderator(tmp_path):
     )
     with pytest.raises(RoomError, match="cannot be removed"):
         await service.action(room["id"], 2, "kick-2", room["revision"], "kick", {"user_id": 2})
+
+
+@pytest.mark.asyncio
+async def test_group_playback_failure_is_retryable_without_revision_change(tmp_path):
+    attempts = 0
+
+    async def playback(chat_id, action, payload):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("voice command failed")
+        return {
+            "track": payload["track"],
+            "status": "playing",
+            "position_seconds": 0,
+            "queue": [],
+        }
+
+    service = RoomService(
+        tmp_path / "rooms.db",
+        playback=playback,
+        authority=lambda uid, chat: uid == 9,
+        member=lambda uid, chat: uid == 9,
+        search=search,
+    )
+    room = await service.ensure_group(100, 1, 9)
+    revision = room["revision"]
+    with pytest.raises(RuntimeError, match="voice command failed"):
+        await service.action(room["id"], 9, "play", revision, "force_play", {"query": "One"})
+    assert (await service.snapshot(room["id"], 9))["revision"] == revision
+    result = await service.action(room["id"], 9, "play", revision, "force_play", {"query": "One"})
+    assert attempts == 2
+    assert result["playback"]["track"]["title"] == "One"
+
+
+@pytest.mark.asyncio
+async def test_group_playback_actions_are_serialized_once(tmp_path):
+    active = 0
+    maximum = 0
+    calls = []
+
+    async def playback(chat_id, action, payload):
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        calls.append(payload["track"]["title"])
+        await __import__("asyncio").sleep(0.02)
+        active -= 1
+        return {
+            "track": payload["track"],
+            "status": "playing",
+            "position_seconds": 0,
+            "queue": [],
+        }
+
+    service = RoomService(
+        tmp_path / "rooms.db",
+        playback=playback,
+        authority=lambda uid, chat: True,
+        member=lambda uid, chat: True,
+        search=search,
+    )
+    room = await service.ensure_group(100, 1, 9)
+    first = __import__("asyncio").create_task(
+        service.action(room["id"], 9, "one", room["revision"], "force_play", {"query": "One"})
+    )
+    await __import__("asyncio").sleep(0)
+    with pytest.raises(RoomError, match="Refresh"):
+        await service.action(room["id"], 9, "two", room["revision"], "force_play", {"query": "Two"})
+    await first
+    assert maximum == 1
+    assert calls == ["One"]
+
+
+@pytest.mark.asyncio
+async def test_replay_rechecks_kick_and_expiry(tmp_path):
+    service = RoomService(tmp_path / "rooms.db")
+    room = await service.create_personal(1, 2)
+    room = await service.join(room["id"], user(2))
+    replayed = await service.action(
+        room["id"], 2, "look", room["revision"], "appearance", {"avatar": "cat"}
+    )
+    owner = await service.snapshot(room["id"], 1)
+    await service.action(room["id"], 1, "kick-replay", owner["revision"], "kick", {"user_id": 2})
+    with pytest.raises(RoomError, match="not active"):
+        await service.action(
+            room["id"], 2, "look", room["revision"], "appearance", {"avatar": "cat"}
+        )
+
+    expiring = await service.create_personal(3, duration=300)
+    historical = await service.action(
+        expiring["id"], 3, "saved", expiring["revision"], "appearance", {"avatar": "fox"}
+    )
+    with service._connect() as db:
+        db.execute("UPDATE rooms SET expires_at=? WHERE id=?", (time.time() - 1, expiring["id"]))
+    with pytest.raises(RoomError, match="expired"):
+        await service.action(
+            expiring["id"], 3, "saved", expiring["revision"], "appearance", {"avatar": "fox"}
+        )
+    assert replayed["id"] == room["id"] and historical["id"] == expiring["id"]
+
+
+@pytest.mark.asyncio
+async def test_group_recovery_and_live_authority_permissions(tmp_path):
+    authorities = {9}
+    service = RoomService(
+        tmp_path / "rooms.db",
+        authority=lambda uid, chat: uid in authorities,
+        member=lambda uid, chat: uid in {9, 10},
+    )
+    room = await service.ensure_group(100, 1, 9)
+    joined = await service.join(room["id"], user(10))
+    assert joined["permissions"]["manage_settings"] is False
+    authorities.clear()
+    authorities.add(10)
+    owner_view = await service.snapshot(room["id"], 9)
+    authority_view = await service.snapshot(room["id"], 10)
+    assert owner_view["permissions"]["manage_settings"] is False
+    assert authority_view["permissions"]["manage_settings"] is True
+    await service.set_recovering(100, "transient voice failure")
+    recovering = await service.snapshot(room["id"], 10)
+    assert recovering["state"] == "recovering"
+    before = recovering["revision"]
+    await service.publish_playback(
+        100, {"track": TRACK, "status": "playing", "position_seconds": 0, "queue": []}
+    )
+    active = await service.snapshot(room["id"], 10)
+    assert active["state"] == "active" and active["revision"] == before + 1
+    await service.publish_playback(
+        100, {"track": TRACK, "status": "playing", "position_seconds": 0, "queue": []}
+    )
+    assert (await service.snapshot(room["id"], 10))["revision"] == active["revision"]

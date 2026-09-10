@@ -6,9 +6,9 @@ The Linux backend is authoritative for room membership, permissions, playback me
 
 Install `fastapi>=0.115,<1` and `uvicorn>=0.30,<1` in the parent dependency change. This scoped commit does not change `pyproject.toml`.
 
-Construct `RoomService(db_path, playback)` and optionally pass `authority=`, `member=`, `on_reentry=`, and `search=` keyword callbacks. Call `start()` and `stop()` with the parent lifecycle. The bot alone calls `create_personal`, `ensure_group`, `end_group`, and `publish_playback`. There is no HTTP room-creation or group-ownership endpoint.
+Construct `RoomService(db_path, playback)` and optionally pass `authority=`, `member=`, `on_reentry=`, and `search=` keyword callbacks. Call `start()` and `stop()` with the parent lifecycle. The bot alone calls `create_personal`, `ensure_group`, `set_recovering`, `end_group`, and `publish_playback`. There is no HTTP room-creation or group-ownership endpoint.
 
-`playback(chat_id, action, payload)` is async and can return the current playback snapshot. `authority(user_id, chat_id)` and `member(user_id, chat_id)` can be sync or async. Group admission fails closed if `member` is absent. Group settings and close fail closed if `authority` is absent. `on_reentry(owner_id, room_id, user_id)` can be sync or async.
+`playback(chat_id, action, payload)` is async and must return the actual registry playback snapshot after a successful group command. The service awaits it while holding the room action lock and commits only after success. The callback must call the media registry command only and must not call `publish_playback` itself. Failed commands remain retryable with the same action ID. Group playback accepts only supported HTTPS YouTube sources. `authority(user_id, chat_id)` and `member(user_id, chat_id)` can be sync or async. Group admission fails closed if `member` is absent. Group settings and close fail closed if `authority` is absent. `on_reentry(owner_id, room_id, user_id)` can be sync or async.
 
 Create the ASGI application with `create_app(service, bot_token, allowed_origins, compass=None, search=None)`. The gateway does not start or stop `RoomService`; the parent owns that lifecycle. Startup refuses an empty bot token or an empty/non-explicit origin list. Keep bot tokens and Telegram session credentials outside browser configuration.
 
@@ -37,7 +37,7 @@ WebSocket updates are `{type:"snapshot",snapshot}` and `{type:"presence",players
 
 Supported actions are `settings`, `queue_add`, `force_play`, `pause`, `resume`, `skip`, `kick`, `moderator`, `request_reentry`, `approve_reentry`, `leave`, `close`, and `appearance`.
 
-The settings payload supports `capacity` (2 to 15), `password`, `owner_lock`, `queue_all`, `theme`, `tv_size`, and `duration` (300 to 86400 seconds from creation). Group passwords and durations are unsupported. Group authority is independently verified for settings and close.
+The settings payload supports `capacity` (2 to 15), `password`, `owner_lock`, `queue_all`, `theme`, `tv_size`, and `duration` (300 to 86400 seconds from creation). Group passwords and durations are unsupported. Group membership is rechecked for every action and replay. Group authority is independently verified for settings, close, moderation, and other privileged controls. Stored room ownership does not grant departed group owners authority. Call `set_recovering(chat_id, reason)` for transient media failures; a later successful command or `publish_playback` marks the room active. Duplicate observer playback snapshots with equal track, status, position, and queue anchors do not increment the revision.
 
 ## Compass
 
