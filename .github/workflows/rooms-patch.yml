@@ -1,0 +1,42 @@
+name: Rooms patch
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Patch scoped files
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path=Path('src/parlay/rooms/service.py')
+          text=path.read_text()
+          old='''            if not member or user_id in data["kicked"]:\n                raise RoomError("access_revoked", "Room access is not active", 403)'''
+          new='''            if not member or (user_id in data["kicked"] and action != "request_reentry"):\n                raise RoomError("access_revoked", "Room access is not active", 403)'''
+          assert text.count(old)==1
+          path.write_text(text.replace(old,new))
+          test=Path('tests/test_rooms_gateway.py')
+          value=test.read_text()
+          old='''        ws2.send_json({"type":"move","x":1,"z":0,"rotation":0,"seq":1})'''
+          new='''        time.sleep(0.11)\n        ws2.send_json({"type":"move","x":1,"z":0,"rotation":0,"seq":1})'''
+          assert value.count(old)==1
+          test.write_text(value.replace(old,new))
+          PY
+      - run: pip install -e . 'fastapi>=0.115,<1' 'uvicorn>=0.30,<1' pytest pytest-asyncio httpx
+      - run: python -m compileall -q src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
+      - run: pytest -q tests/test_rooms_service.py tests/test_rooms_gateway.py
+      - name: Commit scoped patch
+        run: |
+          git config user.name 'Alex C11'
+          git config user.email 'alex.c992954@gmail.com'
+          git add src/parlay/rooms/service.py tests/test_rooms_gateway.py
+          git commit -m 'fix(rooms): allow kicked users to request re-entry'
+          git push
