@@ -111,7 +111,16 @@ class CompassStore:
                    artist=excluded.artist, source_url=excluded.source_url,
                    tags_json=excluded.tags_json, source=excluded.source,
                    rights_note=excluded.rights_note""",
-                (track_id, title, artist, source_url, json.dumps(tags), source, rights_note, time.time()),
+                (
+                    track_id,
+                    title,
+                    artist,
+                    source_url,
+                    json.dumps(tags),
+                    source,
+                    rights_note,
+                    time.time(),
+                ),
             )
 
     def record_event(
@@ -202,7 +211,8 @@ class CompassStore:
     def reset_user(self, user_id: str) -> None:
         with self.connect() as db:
             db.execute(
-                "UPDATE preferences SET dislikes_since_reset=0, paused=0 WHERE user_id=?", (user_id,)
+                "UPDATE preferences SET dislikes_since_reset=0, paused=0 WHERE user_id=?",
+                (user_id,),
             )
             db.execute("DELETE FROM exposures WHERE user_id=?", (user_id,))
 

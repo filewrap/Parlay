@@ -112,8 +112,7 @@ class HybridRanker:
                 margin = float(user_vector @ (positive_vector - negative_vector))
                 gradient = 1.0 / (1.0 + math.exp(max(-30.0, min(30.0, margin))))
                 user_factors[user_number] += learning_rate * (
-                    gradient * (positive_vector - negative_vector)
-                    - regularization * user_vector
+                    gradient * (positive_vector - negative_vector) - regularization * user_vector
                 )
                 item_factors[positive_number] += learning_rate * (
                     gradient * user_vector - regularization * positive_vector

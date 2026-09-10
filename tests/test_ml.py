@@ -27,9 +27,7 @@ def test_contract_validation_and_opt_in(tmp_path: Path) -> None:
         compass.set_preferences("u", True, quiet_start=22)
     compass.set_preferences("u", True, count=1)
     result = compass.recommend("u", 1)
-    assert result[0].keys() == {
-        "id", "title", "source_url", "score", "reason", "model_version"
-    }
+    assert result[0].keys() == {"id", "title", "source_url", "score", "reason", "model_version"}
     assert result[0]["reason"] == "cold-start chart fallback"
 
 
@@ -148,7 +146,9 @@ def test_model_operations_are_serialized_across_worker_threads(
     assert maximum == 1
 
 
-def test_failed_publish_keeps_previous_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_failed_publish_keeps_previous_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     compass = service(tmp_path)
     compass.ingest_track("a", "Alpha")
     compass.set_preferences("u", True)

@@ -166,9 +166,7 @@ class CompassService:
                 else:
                     score = 0.8 * content + 0.2 * popularity
                     reason = (
-                        "cold-start chart fallback"
-                        if not liked_tags
-                        else "cold-start metadata fit"
+                        "cold-start chart fallback" if not liked_tags else "cold-start metadata fit"
                     )
                 scored.append((score, row, reason))
             selected = sorted(scored, key=lambda value: value[0], reverse=True)[:limit]
