@@ -4,8 +4,7 @@ services:
     container_name: parlay-pot-provider
     restart: unless-stopped
     ports:
-      - "4416:4416"
-
+      - "127.0.0.1:4416:4416"
   parlay:
     build: .
     container_name: parlay-bot
@@ -15,9 +14,12 @@ services:
     env_file:
       - .env
     environment:
-      # Reach the provider by its compose service name from inside the network.
       POT_PROVIDER_URL: http://pot-provider:4416
+      BACKEND_HOST: 0.0.0.0
+      BACKEND_PORT: 8080
+    ports:
+      # Terminate public HTTPS/WSS at a reverse proxy on the host.
+      - "127.0.0.1:8080:8080"
     volumes:
-      # Persist the Telethon session file across restarts.
       - ./data:/app/data
     working_dir: /app
