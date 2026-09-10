@@ -14,20 +14,20 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip -q install -e . 'fastapi>=0.115,<1' 'uvicorn>=0.30,<1' httpx websockets pytest pytest-asyncio ruff mypy
-      - name: Correct test setup
+      - name: Correct test capacity action
         run: |
           python - <<'PY'
           from pathlib import Path
           path=Path('tests/test_rooms_service.py'); text=path.read_text()
-          old='''    room = await service.create_personal(1, 2, 3)\n    room = await service.join(room["id"], user(2))\n    room = await service.join(room["id"], user(3))'''
-          new='''    room = await service.create_personal(1, 2, 3, capacity=3)\n    room = await service.join(room["id"], user(2))\n    room = await service.join(room["id"], user(3))'''
+          old='''    room = await service.create_personal(1, 2, 3, capacity=3)\n    room = await service.join(room["id"], user(2))'''
+          new='''    room = await service.create_personal(1, 2, 3)\n    room = await service.action(\n        room["id"], 1, "capacity-3", room["revision"], "settings", {"capacity": 3}\n    )\n    room = await service.join(room["id"], user(2))'''
           assert text.count(old)==1; path.write_text(text.replace(old,new))
           PY
           ruff format tests/test_rooms_service.py
           git config user.name 'Alex C11'
           git config user.email 'alex.c992954@gmail.com'
           git add tests/test_rooms_service.py
-          git commit -m 'test(rooms): provision moderator boundary room capacity'
+          git commit -m 'test(rooms): configure moderator boundary room capacity'
           git pull --rebase origin main
           git push origin HEAD:main
       - run: ruff format --check src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
