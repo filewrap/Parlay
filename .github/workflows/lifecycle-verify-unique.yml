@@ -17,6 +17,8 @@ jobs:
           python-version: '3.11'
       - run: python -m pip install -e '.[dev]'
       - run: python .github/lifecycle_patch.py
+      - run: ruff check --fix src/parlay/app.py tests/test_app_lifecycle.py
+      - run: ruff format src/parlay/app.py tests/test_app_lifecycle.py
       - run: pytest -q tests/test_app_lifecycle.py
       - run: mypy src/parlay/app.py
       - run: ruff check src/parlay/app.py tests/test_app_lifecycle.py

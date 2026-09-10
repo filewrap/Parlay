@@ -206,3 +206,4 @@ async def test_server_timeout_cancels(monkeypatch):
     assert seen == [15]
     assert task.cancelled()
 ''')
+# Lifecycle verification revision 2.
