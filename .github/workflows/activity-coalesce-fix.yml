@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Add discovery coalescing yield
-        run: python -c "from pathlib import Path; p=Path('src/parlay/activity.py'); s=p.read_text(); old='    async def _discover_dialogs(self) -> None:\\n'; new='    async def _discover_dialogs(self) -> None:\\n        # Keep the task pending for one turn so concurrent updates coalesce.\\n        await asyncio.sleep(0)\\n'; assert old in s; p.write_text(s.replace(old,new,1))"
+        run: sed -i '/async def _discover_dialogs/a\        await asyncio.sleep(0)' src/parlay/activity.py
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
