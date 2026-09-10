@@ -1,0 +1,131 @@
+name: Rooms authoritative group integration final
+
+on:
+  push:
+    paths:
+      - .github/workflows/rooms-authority-final.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Apply scoped patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/rooms-authority-fix.yml').read_text()
+          script = workflow.split("python - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
+          script = '\n'.join(line[10:] if line.startswith('          ') else line for line in script.splitlines())
+          helper = '''\ndef method_code(value):
+              lines = value.splitlines()
+              return "\\n".join([lines[0], *("    " + line for line in lines[1:])])
+
+          def test_code(value):
+              output = []
+              in_test = False
+              for line in value.splitlines():
+                  if line.startswith("@pytest"):
+                      in_test = False
+                  output.append("    " + line if in_test else line)
+                  if line.startswith("async def test_"):
+                      in_test = True
+              return "\\n".join(output)
+          '''
+          script = script.replace('text = path.read_text()\n', 'text = path.read_text()\n' + helper, 1)
+          script = script.replace(
+              'def section(start, end, replacement):\n    global text\n',
+              'def section(start, end, replacement):\n    global text\n    replacement = method_code(replacement)\n', 1,
+          )
+          block_start = script.index("old = '''    def _commit_action")
+          block_end_text = 'text = text.replace(old_replace, new_replace, 1)'
+          block_end = script.index(block_end_text, block_start) + len(block_end_text)
+          replacement = '''section(
+              "    def _commit_action(",
+              "    def _expire_due(",
+              """    def _commit_action(
+              self, room_id, revision, data, user_id, action_id, digest, output, changed, state
+          ):
+              with self._connect() as db:
+                  if changed:
+                      db.execute(
+                          "UPDATE rooms SET revision=?,data_json=?,state=?,end_reason=? WHERE id=?",
+                          (revision, json.dumps(data, separators=(",", ":")), state,
+                           None if state == "active" else data.get("end_reason"), room_id),
+                      )
+                  db.execute(
+                      "INSERT INTO room_actions VALUES(?,?,?,?,?,?)",
+                      (room_id, user_id, action_id, digest,
+                       json.dumps(output, separators=(",", ":")), time.time()),
+                  )
+
+          def _save_status(self, room_id, revision, data, state, reason):
+              with self._connect() as db:
+                  db.execute(
+                      "UPDATE rooms SET revision=?,data_json=?,state=?,end_reason=? WHERE id=?",
+                      (revision, json.dumps(data, separators=(",", ":")), state, reason, room_id),
+                  )
+
+          @staticmethod
+          def _playback_anchor(playback):
+              return {
+                  "track": playback.get("track"), "status": playback.get("status"),
+                  "position_seconds": playback.get("position_seconds", 0),
+                  "queue": playback.get("queue", []),
+              }
+          """,
+          )
+
+          replace_start = text.index("    @staticmethod\\n    def _replace(")
+          text = text[:replace_start] + method_code("""    @staticmethod
+          def _replace(row, revision, data, state=None):
+              result = dict(row)
+              result["revision"] = revision
+              result["data_json"] = json.dumps(data)
+              if state is not None:
+                  result["state"] = state
+              elif data.get("force_state"):
+                  result["state"] = data["force_state"]
+              return result
+          """) + "\\n"
+          '''
+          script = script[:block_start] + replacement + script[block_end:]
+          script = script.replace(
+              'if "test_group_playback_failure_is_retryable_without_revision_change" not in test_text:',
+              'addition = test_code(addition)\nif "test_group_playback_failure_is_retryable_without_revision_change" not in test_text:', 1,
+          )
+          exec(compile(script, 'rooms-authority-patch', 'exec'))
+          PY
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip -q
+          pip install -e '.[dev]' -q
+      - name: Format and lint
+        run: |
+          ruff check --fix src/parlay/rooms/service.py tests/test_rooms_service.py
+          ruff format src/parlay/rooms/service.py tests/test_rooms_service.py
+          ruff check src/parlay/rooms/service.py tests/test_rooms_service.py
+          ruff format --check src/parlay/rooms/service.py tests/test_rooms_service.py
+      - name: Scoped tests
+        run: pytest -q tests/test_rooms_service.py
+      - name: Full tests
+        run: pytest -q
+      - name: Type check
+        run: mypy
+      - name: Commit and clean temporary files
+        run: |
+          git config user.name "Alex C11"
+          git config user.email "alex.c992954@gmail.com"
+          git rm .github/workflows/rooms-authority-fix.yml .github/workflows/rooms-authority-repair.yml .github/workflows/rooms-authority-final.yml
+          git add src/parlay/rooms/service.py tests/test_rooms_service.py docs/rooms-api.md
+          git commit -m "fix(rooms): serialize authoritative group playback"
+          git push
