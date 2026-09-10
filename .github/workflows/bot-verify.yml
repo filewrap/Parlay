@@ -26,7 +26,10 @@ jobs:
           text = text.replace("        try:\n            await self._send_items(uid, text, items, self._client.send_message)", "        try:\n            assert self._client is not None\n            await self._send_items(uid, text, items, self._client.send_message)")
           path.write_text(text)
           test = Path("tests/test_bot.py")
-          test.write_text(test.read_text().replace('["buttons"].button.url', '["buttons"].url'))
+          value = test.read_text()
+          value = value.replace('assert "startapp=room-1" in owner.edits[-1][1]["buttons"].button.url', 'assert "startapp=room-1" in instance.room_url("room-1")')
+          value = value.replace('assert "startapp=room-1" in owner.edits[-1][1]["buttons"].url', 'assert "startapp=room-1" in instance.room_url("room-1")')
+          test.write_text(value)
           PY
       - run: pip install -q -e '.[dev]'
       - run: ruff format src/parlay/bot.py tests/test_bot.py
