@@ -1,0 +1,34 @@
+name: Rooms quality
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip -q install -e . 'fastapi>=0.115,<1' 'uvicorn>=0.30,<1' httpx websockets pytest pytest-asyncio ruff mypy
+      - name: Format scoped files
+        run: ruff format src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
+      - name: Lint scoped files
+        run: ruff check --fix src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
+      - run: ruff format --check src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
+      - run: ruff check src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
+      - run: mypy src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
+      - run: pytest -q tests/test_rooms_service.py tests/test_rooms_gateway.py
+      - name: Commit formatter output
+        run: |
+          if ! git diff --quiet; then
+            git config user.name 'Alex C11'
+            git config user.email 'alex.c992954@gmail.com'
+            git add src/parlay/rooms tests/test_rooms_service.py tests/test_rooms_gateway.py
+            git commit -m 'style(rooms): apply scoped quality fixes'
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
