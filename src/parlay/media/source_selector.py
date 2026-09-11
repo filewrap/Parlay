@@ -1,15 +1,16 @@
-"""SourceSelector: resolve a streamable URL across fallback Media Sources.
+"""SourceSelector: resolve a streamable URL, cookieless public sources first.
 
-Source Resolution tries the Media Sources in priority order, YouTube (with a
-PO token), then Invidious, then Piped, and falls through on any block or
-failure. Only when every source fails does it raise SourceResolutionError; the
-caller then reports failure without touching the current track (AC-MUS-003.2/.3).
-Each source picks the highest-quality audio-only format it offers (AC-MUS-003.4).
+Source Resolution leads with the public front-ends (Invidious, then Piped) via
+#PublicSourceClient, which return direct audio URLs over plain HTTP with no
+cookies, sign-in, or proof-of-origin tokens and no dependence on the requesting
+IP's standing with YouTube's bot checks. Only if every public instance fails
+does it fall back to yt-dlp against YouTube using the cookieless tv/web_safari
+client, with the PO-token provider attached as a last resort. Each source picks
+the highest-bitrate audio-only format it offers (AC-MUS-003.4).
 
 yt-dlp is imported lazily and every extraction runs in a thread, so importing
 this module never pulls the native/network surface and the event loop is never
-blocked. Invidious and Piped are reached by pointing yt-dlp at an instance's
-watch URL, so one extractor path serves all three sources.
+blocked.
 """
 
 from __future__ import annotations
@@ -20,8 +21,8 @@ import re
 from typing import Any
 
 from .po_token import PoTokenProvider
+from .public_sources import PublicSourceClient, ResolvedStream
 from .track import (
-    SOURCE_PRIORITY,
     MediaSource,
     SourceResolutionError,
     StreamSource,
@@ -30,67 +31,82 @@ from .track import (
 
 log = logging.getLogger(__name__)
 
-# Default public fallback instances; overridable by the caller for tuning.
-DEFAULT_INVIDIOUS = "https://yewtu.be"
-DEFAULT_PIPED = "https://piped.video"
-
-_YOUTUBE_ID_RE = re.compile(r"(?:v=|youtu\.be/|/watch\?v=)([A-Za-z0-9_-]{11})")
+_YOUTUBE_ID_RE = re.compile(r"(?:v=|youtu\.be/|/watch\?v=|/shorts/)([A-Za-z0-9_-]{11})")
 _BARE_ID_RE = re.compile(r"[A-Za-z0-9_-]{11}")
 
 
 class SourceSelector:
-    """Resolves a Track to a StreamSource by trying sources in priority order."""
+    """Resolve a Track to a StreamSource, public sources first then yt-dlp."""
 
     def __init__(
         self,
         po_tokens: PoTokenProvider,
         *,
-        invidious_base: str = DEFAULT_INVIDIOUS,
-        piped_base: str = DEFAULT_PIPED,
+        public: PublicSourceClient | None = None,
     ) -> None:
         self._po_tokens = po_tokens
-        self._invidious_base = invidious_base.rstrip("/")
-        self._piped_base = piped_base.rstrip("/")
+        self._public = public or PublicSourceClient()
+
+    @property
+    def public(self) -> PublicSourceClient:
+        return self._public
+
+    async def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Search public front-ends first; fall back to a cookieless yt-dlp search."""
+        items = await self._public.search(query, limit)
+        if items:
+            return items
+        return await asyncio.to_thread(self._ytdlp_search, query, limit)
 
     async def resolve(self, track: Track) -> StreamSource:
-        """Try each Media Source in order, returning the first that resolves."""
-        errors: list[str] = []
-        for source in SOURCE_PRIORITY:
-            try:
-                return await self._resolve_one(source, track)
-            except Exception as exc:  # block/failure: fall through to next source
-                log.warning("source %s failed for %r: %s", source, track.query, exc)
-                errors.append(f"{source}: {exc}")
-        raise SourceResolutionError(
-            f"all media sources failed for {track.query!r}: {'; '.join(errors)}"
+        """Resolve a Track to a StreamSource (public first, then yt-dlp)."""
+        video_id = _youtube_id(track.webpage_url or track.query)
+        if video_id is not None:
+            resolved = await self.resolve_by_id(video_id)
+            if resolved is not None:
+                return resolved.stream
+            raise SourceResolutionError(f"no audio stream for {track.query!r}")
+        # Non-YouTube direct link: hand the raw URL to yt-dlp.
+        info = await asyncio.to_thread(
+            self._extract, track.webpage_url or track.query, self._ydl_opts()
         )
-
-    async def _resolve_one(self, source: MediaSource, track: Track) -> StreamSource:
-        target = self._target_url(source, track)
-        opts = self._ydl_opts(source)
-        info = await asyncio.to_thread(self._extract, target, opts)
         stream_url, abr = self._best_audio(info)
         if not stream_url:
-            raise SourceResolutionError(f"{source} offered no audio stream")
-        return StreamSource(source=source, stream_url=stream_url, abr=abr)
+            raise SourceResolutionError(f"no audio stream for {track.query!r}")
+        return StreamSource(source=MediaSource.YOUTUBE, stream_url=stream_url, abr=abr)
 
-    def _target_url(self, source: MediaSource, track: Track) -> str:
-        ref = track.webpage_url or track.query
-        if source is MediaSource.YOUTUBE:
-            return ref
-        # Point yt-dlp at the fallback instance's watch URL for the same video.
-        video_id = _youtube_id(ref)
-        base = self._invidious_base if source is MediaSource.INVIDIOUS else self._piped_base
-        if video_id:
-            return f"{base}/watch?v={video_id}"
-        return ref
+    async def resolve_by_id(self, video_id: str) -> ResolvedStream | None:
+        """Resolve a YouTube id to a stream: public front-ends first, then yt-dlp."""
+        resolved = await self._public.resolve(video_id)
+        if resolved is not None:
+            return resolved
+        try:
+            info = await asyncio.to_thread(
+                self._extract, f"https://www.youtube.com/watch?v={video_id}", self._ydl_opts()
+            )
+        except Exception as exc:
+            log.warning("yt-dlp fallback failed for %s: %s", video_id, exc)
+            return None
+        stream_url, abr = self._best_audio(info)
+        if not stream_url:
+            return None
+        stream = StreamSource(source=MediaSource.YOUTUBE, stream_url=stream_url, abr=abr)
+        return ResolvedStream(
+            stream=stream,
+            title=info.get("title"),
+            duration_s=info.get("duration"),
+        )
 
     def youtube_options(self) -> dict[str, Any]:
-        """Fresh shared options for metadata, search, and stream extraction."""
-        return self._ydl_opts(MediaSource.YOUTUBE)
+        """Fresh cookieless yt-dlp options shared by search, metadata, and streams."""
+        return self._ydl_opts()
 
-    def _ydl_opts(self, source: MediaSource) -> dict[str, Any]:
-        opts: dict[str, Any] = {
+    def _ydl_opts(self) -> dict[str, Any]:
+        # Cookieless YouTube via the tv/web_safari clients, the least-scrutinised
+        # clients that work for anonymous requests from datacenter IPs. The bgutil
+        # PO-token provider is attached as a best-effort last resort; it is not
+        # required for the public path and does not guarantee access on its own.
+        return {
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,
@@ -98,26 +114,52 @@ class SourceSelector:
             "socket_timeout": 10,
             "retries": 1,
             "extractor_retries": 1,
-        }
-        if source is MediaSource.YOUTUBE:
-            # Cookieless YouTube via the mweb client. The bgutil yt-dlp plugin
-            # mints a fresh, content-bound PO token per video from the running
-            # provider service; we only point it at that service's base URL.
-            opts["extractor_args"] = {
-                "youtube": {"player_client": ["mweb", "web_music"]},
+            "noplaylist": True,
+            "extractor_args": {
+                "youtube": {"player_client": ["tv", "web_safari"]},
                 **self._po_tokens.extractor_args(),
+            },
+        }
+
+    def _ytdlp_search(self, query: str, limit: int) -> list[dict[str, Any]]:
+        options = {**self._ydl_opts(), "extract_flat": "in_playlist"}
+        info = self._extract(f"ytsearch{limit}:{query}", options, allow_empty=True)
+        entries = info.get("entries") if "entries" in info else [info]
+        items: list[dict[str, Any]] = []
+        for entry in entries or []:
+            if not entry:
+                continue
+            video_id = str(entry.get("id") or "")
+            if len(video_id) != 11 or entry.get("is_live"):
+                continue
+            item: dict[str, Any] = {
+                "id": video_id,
+                "youtube_id": video_id,
+                "title": str(entry.get("title") or video_id)[:500],
+                "source_url": f"https://www.youtube.com/watch?v={video_id}",
+                "artist": str(entry.get("artist") or entry.get("uploader") or "")[:200],
             }
-        return opts
+            duration = entry.get("duration")
+            if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+                item["duration"] = duration
+            items.append(item)
+            if len(items) >= limit:
+                break
+        return items
 
     @staticmethod
-    def _extract(target: str, opts: dict[str, Any]) -> dict[str, Any]:
+    def _extract(
+        target: str, opts: dict[str, Any], *, allow_empty: bool = False
+    ) -> dict[str, Any]:
         from yt_dlp import YoutubeDL  # lazy: avoids import at module load
 
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(target, download=False)
         if info is None:
+            if allow_empty:
+                return {}
             raise SourceResolutionError("extractor returned no info")
-        if "entries" in info:  # a playlist/search result: take the first entry
+        if "entries" in info and not allow_empty:
             entries = [e for e in info["entries"] if e]
             if not entries:
                 raise SourceResolutionError("extractor returned no entries")
@@ -135,7 +177,6 @@ class SourceSelector:
         ]
         candidates = audio_only or formats
         if not candidates:
-            # Some extractors give a single resolved url on the info dict itself.
             return info.get("url"), info.get("abr")
         best = max(candidates, key=lambda f: f.get("abr") or f.get("tbr") or 0.0)
         return best.get("url"), best.get("abr") or best.get("tbr")

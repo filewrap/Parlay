@@ -20,6 +20,7 @@ import logging
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from typing import Any
 
 from .track import MediaSource, StreamSource
@@ -43,6 +44,15 @@ DEFAULT_PIPED: tuple[str, ...] = (
 )
 
 
+@dataclass(frozen=True)
+class ResolvedStream:
+    """A direct audio stream plus the metadata the front-end returned with it."""
+
+    stream: StreamSource
+    title: str | None = None
+    duration_s: float | None = None
+
+
 def _to_kbps(value: Any) -> float:
     """Normalise a bitrate field (bits/sec, int or string) to kbps for ranking."""
     try:
@@ -50,6 +60,12 @@ def _to_kbps(value: Any) -> float:
     except (TypeError, ValueError):
         return -1.0
     return number / 1000.0 if number > 0 else -1.0
+
+
+def _duration(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if value > 0 else None
 
 
 def _video_id_from_watch(path: str) -> str | None:
@@ -77,8 +93,8 @@ class PublicSourceClient:
         """Return up to ``limit`` search results, or an empty list if none resolve."""
         return await asyncio.to_thread(self._search_sync, query, limit)
 
-    async def resolve_stream(self, video_id: str) -> StreamSource | None:
-        """Return a direct audio StreamSource for a video id, or None on failure."""
+    async def resolve(self, video_id: str) -> ResolvedStream | None:
+        """Return a direct audio stream and metadata for a video id, or None."""
         return await asyncio.to_thread(self._resolve_sync, video_id)
 
     # -- synchronous workers (executed in a thread) --
@@ -102,23 +118,23 @@ class PublicSourceClient:
                 return items
         return []
 
-    def _resolve_sync(self, video_id: str) -> StreamSource | None:
+    def _resolve_sync(self, video_id: str) -> ResolvedStream | None:
         for base in self._invidious:
             try:
-                stream = self._invidious_stream(base, video_id)
+                resolved = self._invidious_stream(base, video_id)
             except Exception as exc:
                 log.warning("invidious stream failed at %s: %s", base, exc)
                 continue
-            if stream is not None:
-                return stream
+            if resolved is not None:
+                return resolved
         for base in self._piped:
             try:
-                stream = self._piped_stream(base, video_id)
+                resolved = self._piped_stream(base, video_id)
             except Exception as exc:
                 log.warning("piped stream failed at %s: %s", base, exc)
                 continue
-            if stream is not None:
-                return stream
+            if resolved is not None:
+                return resolved
         return None
 
     def _get_json(self, url: str) -> Any:
@@ -143,7 +159,7 @@ class PublicSourceClient:
                 break
         return items
 
-    def _invidious_stream(self, base: str, video_id: str) -> StreamSource | None:
+    def _invidious_stream(self, base: str, video_id: str) -> ResolvedStream | None:
         data = self._get_json(f"{base}/api/v1/videos/{video_id}")
         best_url: str | None = None
         best_abr = -1.0
@@ -158,8 +174,15 @@ class PublicSourceClient:
                 best_url, best_abr = url, abr
         if not best_url:
             return None
-        return StreamSource(
-            source=MediaSource.INVIDIOUS, stream_url=best_url, abr=best_abr if best_abr >= 0 else None
+        stream = StreamSource(
+            source=MediaSource.INVIDIOUS,
+            stream_url=best_url,
+            abr=best_abr if best_abr >= 0 else None,
+        )
+        return ResolvedStream(
+            stream=stream,
+            title=str(data.get("title")) if data.get("title") else None,
+            duration_s=_duration(data.get("lengthSeconds")),
         )
 
     def _piped_search(self, base: str, query: str, limit: int) -> list[dict[str, Any]]:
@@ -170,15 +193,14 @@ class PublicSourceClient:
             video_id = _video_id_from_watch(str(entry.get("url") or ""))
             if not video_id or entry.get("isShort"):
                 continue
-            duration = entry.get("duration")
             items.append(
-                _item(video_id, entry.get("title"), entry.get("uploaderName"), duration)
+                _item(video_id, entry.get("title"), entry.get("uploaderName"), entry.get("duration"))
             )
             if len(items) >= limit:
                 break
         return items
 
-    def _piped_stream(self, base: str, video_id: str) -> StreamSource | None:
+    def _piped_stream(self, base: str, video_id: str) -> ResolvedStream | None:
         data = self._get_json(f"{base}/streams/{video_id}")
         best_url: str | None = None
         best_abr = -1.0
@@ -191,8 +213,15 @@ class PublicSourceClient:
                 best_url, best_abr = url, abr
         if not best_url:
             return None
-        return StreamSource(
-            source=MediaSource.PIPED, stream_url=best_url, abr=best_abr if best_abr >= 0 else None
+        source = StreamSource(
+            source=MediaSource.PIPED,
+            stream_url=best_url,
+            abr=best_abr if best_abr >= 0 else None,
+        )
+        return ResolvedStream(
+            stream=source,
+            title=str(data.get("title")) if data.get("title") else None,
+            duration_s=_duration(data.get("duration")),
         )
 
 
@@ -204,6 +233,7 @@ def _item(video_id: str, title: Any, artist: Any, duration: Any) -> dict[str, An
         "source_url": f"https://www.youtube.com/watch?v={video_id}",
         "artist": str(artist or "")[:200],
     }
-    if isinstance(duration, (int, float)) and not isinstance(duration, bool) and duration > 0:
-        item["duration"] = duration
+    seconds = _duration(duration)
+    if seconds is not None:
+        item["duration"] = seconds
     return item

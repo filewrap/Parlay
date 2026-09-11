@@ -1,24 +1,23 @@
 """TrackResolver: turn play text or a link into a resolved, streamable track.
 
-The resolver is the entry point of the Media Sourcing Pipeline. It builds a
-`Track` from a search query or a link (running a `ytsearch:` search for plain
-text), then drives the `SourceSelector` to obtain a streamable URL across the
-fallback sources. It reports not-found when a search matches nothing and
-surfaces a resolution failure when every source fails, without altering any
-currently playing track (that policy lives in the caller).
+The resolver is the entry point of the Media Sourcing Pipeline. For search text
+it runs one public search to pick the best match, then one stream lookup; for a
+YouTube link it resolves the stream directly by video id. Both paths lead with
+the cookieless public front-ends and fall back to yt-dlp inside #SourceSelector,
+so there is a single resolution round rather than a metadata probe followed by a
+separate stream probe.
 
-The metadata lookup uses yt-dlp lazily in a thread, mirroring SourceSelector,
-so importing this module pulls no native/network surface.
+It reports not-found when a search matches nothing and surfaces a resolution
+failure when every source fails, without altering any currently playing track
+(that policy lives in the caller).
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any
 
-from .source_selector import SourceSelector
+from .source_selector import SourceSelector, _youtube_id
 from .track import SourceResolutionError, StreamSource, Track, TrackNotFoundError
 
 log = logging.getLogger(__name__)
@@ -45,43 +44,47 @@ class TrackResolver:
         query = request.strip()
         if not query:
             raise TrackNotFoundError("empty play request")
-        track = await self._build_track(query)
+        if query.startswith(_LINK_PREFIXES):
+            return await self._resolve_link(query)
+        return await self._resolve_search(query)
+
+    async def _resolve_search(self, query: str) -> ResolvedTrack:
+        items = await self._selector.search(query, 1)
+        if not items:
+            raise TrackNotFoundError(f"no track matched {query!r}")
+        item = items[0]
+        video_id = str(item["youtube_id"])
+        resolved = await self._selector.resolve_by_id(video_id)
+        if resolved is None:
+            raise SourceResolutionError(
+                f"no media source could stream {query!r}. Every public instance "
+                "and the yt-dlp fallback failed; check the media provider logs."
+            )
+        track = Track(
+            title=str(item.get("title") or query),
+            query=query,
+            webpage_url=item["source_url"],
+            duration_s=item.get("duration") or resolved.duration_s,
+        )
+        return ResolvedTrack(track=track, stream=resolved.stream)
+
+    async def _resolve_link(self, query: str) -> ResolvedTrack:
+        video_id = _youtube_id(query)
+        if video_id is not None:
+            resolved = await self._selector.resolve_by_id(video_id)
+            if resolved is None:
+                raise SourceResolutionError(
+                    f"no media source could stream {query!r}. Every public instance "
+                    "and the yt-dlp fallback failed; check the media provider logs."
+                )
+            track = Track(
+                title=str(resolved.title or query),
+                query=query,
+                webpage_url=f"https://www.youtube.com/watch?v={video_id}",
+                duration_s=resolved.duration_s,
+            )
+            return ResolvedTrack(track=track, stream=resolved.stream)
+        # Non-YouTube direct link: resolve the raw URL through the yt-dlp fallback.
+        track = Track(title=query, query=query, webpage_url=query)
         stream = await self._selector.resolve(track)
         return ResolvedTrack(track=track, stream=stream)
-
-    async def _build_track(self, query: str) -> Track:
-        is_link = query.startswith(_LINK_PREFIXES)
-        target = query if is_link else f"ytsearch1:{query}"
-        from yt_dlp.utils import DownloadError
-
-        try:
-            info = await asyncio.to_thread(self._probe, target)
-        except DownloadError as exc:
-            raise SourceResolutionError(
-                "YouTube metadata is unavailable or access was blocked. "
-                "Check the media provider logs before retrying."
-            ) from exc
-        if info is None:
-            raise TrackNotFoundError(f"no track matched {query!r}")
-        return Track(
-            title=str(info.get("title") or query),
-            query=query,
-            webpage_url=info.get("webpage_url") or info.get("url"),
-            duration_s=info.get("duration"),
-        )
-
-    def _probe(self, target: str) -> dict[str, Any] | None:
-        from yt_dlp import YoutubeDL  # lazy: avoids import at module load
-
-        opts = self._selector.youtube_options()
-        opts["noplaylist"] = True
-        with YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(target, download=False)
-        if info is None:
-            return None
-        if "entries" in info:
-            entries = [e for e in info["entries"] if e]
-            if not entries:
-                return None
-            return entries[0]
-        return info
