@@ -27,8 +27,10 @@ jobs:
         run: pip install -e '.[dev]' -q
       - name: Apply bot.py changes
         run: python .github/scripts/apply_bot_buttons.py
-      - name: Auto-format
-        run: ruff format src/parlay/bot.py
+      - name: Auto-format and fix
+        run: |
+          ruff check --fix .
+          ruff format .
       - name: Lint
         run: ruff check .
       - name: Format check
@@ -41,7 +43,7 @@ jobs:
         run: |
           git config user.name kei
           git config user.email xkailashhh@gmail.com
-          git add src/parlay/bot.py
+          git add -A
           if ! git diff --cached --quiet; then
             git commit -m 'feat: companion bot playback control buttons (pause/resume/skip)'
             git push origin main
