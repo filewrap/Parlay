@@ -194,7 +194,9 @@ class PublicSourceClient:
             if not video_id or entry.get("isShort"):
                 continue
             items.append(
-                _item(video_id, entry.get("title"), entry.get("uploaderName"), entry.get("duration"))
+                _item(
+                    video_id, entry.get("title"), entry.get("uploaderName"), entry.get("duration")
+                )
             )
             if len(items) >= limit:
                 break

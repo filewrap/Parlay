@@ -148,9 +148,7 @@ class SourceSelector:
         return items
 
     @staticmethod
-    def _extract(
-        target: str, opts: dict[str, Any], *, allow_empty: bool = False
-    ) -> dict[str, Any]:
+    def _extract(target: str, opts: dict[str, Any], *, allow_empty: bool = False) -> dict[str, Any]:
         from yt_dlp import YoutubeDL  # lazy: avoids import at module load
 
         with YoutubeDL(opts) as ydl:
