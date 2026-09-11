@@ -13,19 +13,31 @@ Raw functions used (Telethon `telethon.tl.functions` / `telethon.tl.types`):
 - phone.DiscardGroupCallRequest(call) -> stop a voice chat.
 - channels.GetParticipantRequest(channel, participant) -> own banned rights,
     used for the can-send check before posting into a call chat.
+
+The active-call lookup is the single most FloodWait-prone request here: a
+GetFullChannelRequest per resolution, issued more than once per /play (join then
+status). A short per-chat cache collapses that burst to one request; start/stop
+invalidate the cache so reported state never lags an intentional change.
 """
 
 from __future__ import annotations
 
 import logging
 import secrets
+import time
 from dataclasses import dataclass
 from typing import Any
 
 from telethon.errors import ChatAdminRequiredError
 from telethon.tl import functions, types
+from telethon.utils import get_peer_id
 
 log = logging.getLogger(__name__)
+
+# How long a resolved active-call result stays reusable. Long enough to collapse
+# the join+status burst of a single command, short enough that a call starting
+# or ending elsewhere is picked up promptly.
+_CALL_CACHE_TTL_S = 5.0
 
 
 class VoiceChatError(Exception):
@@ -46,6 +58,8 @@ class VoiceChatController:
 
     def __init__(self, client: Any) -> None:
         self._client = client
+        # chat key -> (expiry_monotonic, active InputGroupCall or None)
+        self._call_cache: dict[int, tuple[float, Any]] = {}
 
     async def resolve(self, chat: Any) -> Any:
         """Resolve a chat reference (id, username, link, entity) via Telethon."""
@@ -56,9 +70,19 @@ class VoiceChatController:
         except (ValueError, TypeError) as exc:
             raise VoiceChatError(f"Cannot resolve chat {chat!r}: {exc}") from exc
 
-    async def get_active_call(self, chat: Any) -> Any | None:
-        """Return the chat's active group call (InputGroupCall) or None."""
-        entity = await self.resolve(chat)
+    @staticmethod
+    def _cache_key(entity: Any) -> int | None:
+        try:
+            return int(get_peer_id(entity))
+        except (TypeError, ValueError):
+            return None
+
+    def _invalidate(self, entity: Any) -> None:
+        key = self._cache_key(entity)
+        if key is not None:
+            self._call_cache.pop(key, None)
+
+    async def _fetch_active_call(self, entity: Any) -> Any | None:
         if isinstance(entity, types.Channel):
             full = await self._client(functions.channels.GetFullChannelRequest(entity))
         elif isinstance(entity, types.Chat):
@@ -66,6 +90,27 @@ class VoiceChatController:
         else:
             raise VoiceChatError("Voice chats exist only in groups and channels.")
         return full.full_chat.call
+
+    async def get_active_call(self, chat: Any) -> Any | None:
+        """Return the chat's active group call (InputGroupCall) or None.
+
+        Cached briefly per chat so the join+status burst of a single command
+        issues one GetFullChannelRequest instead of several, which is what drove
+        the FloodWaits on this request.
+        """
+        entity = await self.resolve(chat)
+        key = self._cache_key(entity)
+        now = time.monotonic()
+        if key is not None:
+            cached = self._call_cache.get(key)
+            if cached is not None and cached[0] > now:
+                return cached[1]
+        call = await self._fetch_active_call(entity)
+        if key is not None:
+            self._call_cache[key] = (now + _CALL_CACHE_TTL_S, call)
+            if len(self._call_cache) > 4096:
+                self._call_cache.pop(next(iter(self._call_cache)))
+        return call
 
     async def status(self, chat: Any) -> VcStatus:
         """Report whether the chat's voice chat is live and how many are in it."""
@@ -96,6 +141,7 @@ class VoiceChatController:
             )
         except ChatAdminRequiredError as exc:
             raise VoiceChatError("Starting a voice chat needs admin rights here.") from exc
+        self._invalidate(entity)
         call = await self.get_active_call(entity)
         if call is None:
             raise VoiceChatError("Telegram did not report the new voice chat.")
@@ -103,13 +149,15 @@ class VoiceChatController:
 
     async def stop(self, chat: Any) -> None:
         """Discard the chat's active voice chat."""
-        call = await self.get_active_call(chat)
+        entity = await self.resolve(chat)
+        call = await self.get_active_call(entity)
         if call is None:
             raise VoiceChatError("No active voice chat to stop.")
         try:
             await self._client(functions.phone.DiscardGroupCallRequest(call=call))
         except ChatAdminRequiredError as exc:
             raise VoiceChatError("Stopping the voice chat needs admin rights here.") from exc
+        self._invalidate(entity)
 
     async def can_send(self, chat: Any) -> bool:
         """True when this account may send messages in the chat.
