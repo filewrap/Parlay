@@ -160,9 +160,9 @@ async def test_play_attaches_control_buttons(tmp_path):
         return {"id": "room-1", "revision": 4}
 
     instance = bot(tmp_path, play=play)
-    event = Event(10, private=False, group=True)
+    # Sender 99 matches the configured operator_id, so playback is authorized.
+    event = Event(99, private=False, group=True)
     await instance._command_play(event, "a song")
-    # The reply carries a keyboard with control buttons plus Open room.
     _, kwargs = event.replies[-1]
     labels = [b.text for row in kwargs["buttons"] for b in row]
     assert "Pause" in labels and "Skip" in labels and "Open room" in labels
@@ -170,10 +170,7 @@ async def test_play_attaches_control_buttons(tmp_path):
 
 @pytest.mark.asyncio
 async def test_control_button_issues_room_action_for_presser(tmp_path):
-    async def play(user_id, chat_id, query):
-        return {"id": "room-1", "revision": 4}
-
-    instance = bot(tmp_path, play=play)
+    instance = bot(tmp_path)
     token = instance._state.callback(10, "control", {"room_id": "room-1", "verb": "skip"})
     owner = Event(10)
     owner.data = instance._callback_data(token)
