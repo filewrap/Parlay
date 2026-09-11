@@ -54,6 +54,7 @@ class Event:
         self.is_private = private
         self.is_group = group
         self.is_reply = False
+        self.chat_id = 555
         self.replies = []
         self.answers = []
         self.edits = []
@@ -72,14 +73,15 @@ class Event:
         self.edits.append((text, kwargs))
 
 
-def bot(tmp_path):
+def bot(tmp_path, play=None):
     config = SimpleNamespace(
         bot_db_path=tmp_path / "bot.db",
         bot_username="parlay_test_bot",
         mini_app_url="https://app.example.test",
         operator_id="99",
     )
-    return CompanionBot(config, Rooms(), Compass(), lambda *args: None, client=SimpleNamespace())
+    play = play or (lambda *args: None)
+    return CompanionBot(config, Rooms(), Compass(), play, client=SimpleNamespace())
 
 
 def test_room_duration_exact_single_value_and_bounds(tmp_path):
@@ -150,3 +152,44 @@ async def test_compass_requires_private_start_before_explicit_opt_in(tmp_path):
     group = Event(private=False, group=True)
     await instance._command_start(group, "")
     assert instance._state.eligible(10) is False
+
+
+@pytest.mark.asyncio
+async def test_play_attaches_control_buttons(tmp_path):
+    async def play(user_id, chat_id, query):
+        return {"id": "room-1", "revision": 4}
+
+    instance = bot(tmp_path, play=play)
+    event = Event(10, private=False, group=True)
+    await instance._command_play(event, "a song")
+    # The reply carries a keyboard with control buttons plus Open room.
+    _, kwargs = event.replies[-1]
+    labels = [b.text for row in kwargs["buttons"] for b in row]
+    assert "Pause" in labels and "Skip" in labels and "Open room" in labels
+
+
+@pytest.mark.asyncio
+async def test_control_button_issues_room_action_for_presser(tmp_path):
+    async def play(user_id, chat_id, query):
+        return {"id": "room-1", "revision": 4}
+
+    instance = bot(tmp_path, play=play)
+    token = instance._state.callback(10, "control", {"room_id": "room-1", "verb": "skip"})
+    owner = Event(10)
+    owner.data = instance._callback_data(token)
+    await instance._on_callback(owner)
+    assert instance.rooms.actions, "expected a room action to be issued"
+    call = instance.rooms.actions[-1]
+    assert call[0] == "room-1"
+    assert call[4] == "skip"
+
+
+@pytest.mark.asyncio
+async def test_control_button_is_owner_bound(tmp_path):
+    instance = bot(tmp_path)
+    token = instance._state.callback(10, "control", {"room_id": "room-1", "verb": "pause"})
+    stranger = Event(11)
+    stranger.data = instance._callback_data(token)
+    await instance._on_callback(stranger)
+    assert instance.rooms.actions == []
+    assert stranger.answers[-1][1]["alert"] is True
