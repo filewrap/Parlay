@@ -1,0 +1,52 @@
+name: Apply button glyphs
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-button-glyphs.yml'
+      - '.github/scripts/apply_button_glyphs.py'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg > /dev/null
+      - name: Install project
+        run: pip install -e '.[dev]' -q
+      - name: Apply patch
+        run: python .github/scripts/apply_button_glyphs.py
+      - name: Ruff fix
+        run: ruff check --fix .
+      - name: Ruff format
+        run: ruff format .
+      - name: Lint
+        run: ruff check .
+      - name: Format check
+        run: ruff format --check .
+      - name: Types
+        run: mypy
+      - name: Tests
+        run: pytest -q
+      - name: Commit result
+        run: |
+          git config user.name 'kei'
+          git config user.email 'xkailashhh@gmail.com'
+          if git diff --quiet; then
+            echo 'no changes to commit'
+            exit 0
+          fi
+          git add -A
+          git commit -m 'feat(bot): glyph labels on playback control buttons'
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
