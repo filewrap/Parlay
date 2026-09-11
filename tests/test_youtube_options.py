@@ -20,9 +20,9 @@ def test_provider_dependency_and_real_argument_parser():
     selector = SourceSelector(PoTokenProvider("http://pot-provider:4416"))
     with YoutubeDL(selector.youtube_options()) as ydl:
         ie = YoutubeIE(ydl)
-        assert ie._configuration_arg(
-            "base_url", ie_key="youtubepot-bgutilhttp"
-        ) == ["http://pot-provider:4416"]
+        assert ie._configuration_arg("base_url", ie_key="youtubepot-bgutilhttp") == [
+            "http://pot-provider:4416"
+        ]
 
 
 def test_metadata_and_search_share_provider_settings(monkeypatch):

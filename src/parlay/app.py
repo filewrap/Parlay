@@ -53,7 +53,7 @@ class ParlayApp:
             self._on_closed,
             self._on_transport,
         )
-        self.search = MediaSearch()
+        self.search = MediaSearch(config.pot_provider_url)
         self.activity: ActivityTracker | None = None
         self.rooms: RoomService | None = None
         self.compass: CompassService | None = None

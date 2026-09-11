@@ -12,6 +12,7 @@ from telethon.errors import FloodWaitError, RPCError
 
 from . import presentation as fmt
 from .commands import CommandHandler
+from .media.track import MediaError
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +66,12 @@ class TelegramCommandWrapper:
             except FloodWaitError as exc:
                 log.warning("Telegram requested a command cooldown of %s seconds", exc.seconds)
                 return
+            except MediaError:
+                log.warning("Media resolution or playback failed", exc_info=True)
+                reply = fmt.error(
+                    "The media source could not provide this track. "
+                    "It may be blocked or unavailable. Check the provider logs."
+                )
             except RPCError:
                 log.warning("Telegram rejected a command operation", exc_info=True)
                 reply = fmt.error("Telegram rejected this operation. Check access and call status.")

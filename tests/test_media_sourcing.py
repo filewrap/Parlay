@@ -19,8 +19,8 @@ from parlay.media.track import (
 
 
 class FakePoTokens:
-    def extractor_args(self) -> dict[str, list[str]]:
-        return {"youtubepot-bgutilhttp": ["base_url=http://prov:4416"]}
+    def extractor_args(self) -> dict[str, dict[str, list[str]]]:
+        return {"youtubepot-bgutilhttp": {"base_url": ["http://prov:4416"]}}
 
 
 def _track() -> Track:
@@ -90,7 +90,7 @@ def test_po_token_extractor_args_point_at_base_url() -> None:
 
     provider = po_token.PoTokenProvider("http://prov:4416/")
     args = provider.extractor_args()
-    assert args == {"youtubepot-bgutilhttp": ["base_url=http://prov:4416"]}
+    assert args == {"youtubepot-bgutilhttp": {"base_url": ["http://prov:4416"]}}
 
 
 async def test_po_token_ping_ok(monkeypatch: pytest.MonkeyPatch) -> None:

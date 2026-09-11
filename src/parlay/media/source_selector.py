@@ -85,12 +85,19 @@ class SourceSelector:
             return f"{base}/watch?v={video_id}"
         return ref
 
+    def youtube_options(self) -> dict[str, Any]:
+        """Fresh shared options for metadata, search, and stream extraction."""
+        return self._ydl_opts(MediaSource.YOUTUBE)
+
     def _ydl_opts(self, source: MediaSource) -> dict[str, Any]:
         opts: dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,
             "format": "bestaudio/best",
+            "socket_timeout": 10,
+            "retries": 1,
+            "extractor_retries": 1,
         }
         if source is MediaSource.YOUTUBE:
             # Cookieless YouTube via the mweb client. The bgutil yt-dlp plugin

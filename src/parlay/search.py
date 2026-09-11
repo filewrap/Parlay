@@ -8,6 +8,8 @@ import time
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+from .media.po_token import PoTokenProvider
+from .media.source_selector import SourceSelector
 from .rooms.service import RoomError
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
@@ -15,7 +17,8 @@ _HOSTS = {"youtube.com", "www.youtube.com", "music.youtube.com", "m.youtube.com"
 
 
 class MediaSearch:
-    def __init__(self) -> None:
+    def __init__(self, pot_provider_url: str = "http://127.0.0.1:4416") -> None:
+        self._selector = SourceSelector(PoTokenProvider(pot_provider_url))
         self._slots = asyncio.Semaphore(2)
         self._cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
@@ -59,11 +62,11 @@ class MediaSearch:
             self._cache[target] = (time.monotonic() + 120, tracks)
             return [dict(item) for item in tracks]
 
-    @staticmethod
-    def _probe(target: str) -> list[dict[str, Any]]:
+    def _probe(self, target: str) -> list[dict[str, Any]]:
         from yt_dlp import YoutubeDL
 
         options = {
+            **self._selector.youtube_options(),
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,

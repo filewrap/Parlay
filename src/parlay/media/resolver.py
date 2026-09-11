@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .source_selector import SourceSelector
-from .track import StreamSource, Track, TrackNotFoundError
+from .track import SourceResolutionError, StreamSource, Track, TrackNotFoundError
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +52,15 @@ class TrackResolver:
     async def _build_track(self, query: str) -> Track:
         is_link = query.startswith(_LINK_PREFIXES)
         target = query if is_link else f"ytsearch1:{query}"
-        info = await asyncio.to_thread(self._probe, target)
+        from yt_dlp.utils import DownloadError
+
+        try:
+            info = await asyncio.to_thread(self._probe, target)
+        except DownloadError as exc:
+            raise SourceResolutionError(
+                "YouTube metadata is unavailable or access was blocked. "
+                "Check the media provider logs before retrying."
+            ) from exc
         if info is None:
             raise TrackNotFoundError(f"no track matched {query!r}")
         return Track(
@@ -62,11 +70,11 @@ class TrackResolver:
             duration_s=info.get("duration"),
         )
 
-    @staticmethod
-    def _probe(target: str) -> dict[str, Any] | None:
+    def _probe(self, target: str) -> dict[str, Any] | None:
         from yt_dlp import YoutubeDL  # lazy: avoids import at module load
 
-        opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+        opts = self._selector.youtube_options()
+        opts["noplaylist"] = True
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(target, download=False)
         if info is None:

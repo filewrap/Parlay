@@ -1,7 +1,7 @@
 """PoTokenProvider: wires yt-dlp to the bgutil PO-token provider service.
 
-YouTube blocks server-side requests that lack a proof-of-origin (PO) token, and
-cookie auth gets accounts banned. Parlay runs the bgutil-ytdlp-pot-provider
+YouTube may require proof-of-origin (PO) tokens for media requests. Tokens do not
+guarantee access, and account-cookie use can carry account restrictions. Parlay runs the bgutil-ytdlp-pot-provider
 HTTP server alongside the bot (ADR-001). The correct integration is NOT to
 fetch a token by hand: the bgutil yt-dlp *plugin* registers with yt-dlp's PO
 Token Provider framework and mints a fresh, content-bound token per video on
@@ -49,13 +49,13 @@ class PoTokenProvider:
     def base_url(self) -> str:
         return self._base_url
 
-    def extractor_args(self) -> dict[str, list[str]]:
+    def extractor_args(self) -> dict[str, dict[str, list[str]]]:
         """Return the extractor-args entry that points yt-dlp at the provider.
 
         The bgutil plugin then fetches a content-bound PO token per video via
         the running HTTP server, so no token is handled here.
         """
-        return {_PLUGIN_ARG_KEY: [f"base_url={self._base_url}"]}
+        return {_PLUGIN_ARG_KEY: {"base_url": [self._base_url]}}
 
     async def ping(self) -> None:
         """Verify the provider service is reachable, raising PoTokenError if not."""
