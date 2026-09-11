@@ -22,11 +22,11 @@ MEDIA_TEST = Path("tests/test_media_sourcing.py")
 
 BOT_OLD = '        controls = (("Pause", "pause"), ("Resume", "resume"), ("Skip", "skip"))'
 BOT_NEW = (
-    '        controls = (\n'
+    "        controls = (\n"
     '            ("\\u23f8 Pause", "pause"),\n'
     '            ("\\u25b6 Resume", "resume"),\n'
     '            ("\\u23ed Skip", "skip"),\n'
-    '        )'
+    "        )"
 )
 
 TEST_OLD = '    assert "Pause" in labels and "Skip" in labels and "Open room" in labels'

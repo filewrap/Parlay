@@ -117,8 +117,8 @@ class PublicSourceClient:
         piped: tuple[str, ...] | None = None,
         timeout_s: float = _TIMEOUT_S,
     ) -> None:
-        chosen_invidious = invidious if invidious is not None else _from_env(
-            _ENV_INVIDIOUS, DEFAULT_INVIDIOUS
+        chosen_invidious = (
+            invidious if invidious is not None else _from_env(_ENV_INVIDIOUS, DEFAULT_INVIDIOUS)
         )
         chosen_piped = piped if piped is not None else _from_env(_ENV_PIPED, DEFAULT_PIPED)
         self._invidious = tuple(base.rstrip("/") for base in chosen_invidious)

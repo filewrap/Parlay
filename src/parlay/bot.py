@@ -273,7 +273,11 @@ class CompanionBot:
 
     async def _control_buttons(self, owner_id: int, room_id: str) -> list[list[Any]]:
         """Build owner-bound pause/resume/skip controls plus an Open room link."""
-        controls = (("Pause", "pause"), ("Resume", "resume"), ("Skip", "skip"))
+        controls = (
+            ("\u23f8 Pause", "pause"),
+            ("\u25b6 Resume", "resume"),
+            ("\u23ed Skip", "skip"),
+        )
         row = []
         for label, verb in controls:
             token = await asyncio.to_thread(

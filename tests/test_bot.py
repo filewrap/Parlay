@@ -165,7 +165,8 @@ async def test_play_attaches_control_buttons(tmp_path):
     await instance._command_play(event, "a song")
     _, kwargs = event.replies[-1]
     labels = [b.text for row in kwargs["buttons"] for b in row]
-    assert "Pause" in labels and "Skip" in labels and "Open room" in labels
+    joined = " ".join(labels)
+    assert "Pause" in joined and "Skip" in joined and "Open room" in joined
 
 
 @pytest.mark.asyncio
