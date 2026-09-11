@@ -16,6 +16,11 @@ from .media.track import MediaError
 
 log = logging.getLogger(__name__)
 
+# Commands slow enough to warrant a live status message that is edited in place
+# rather than a reply that only appears once the work is done.
+_PROGRESS_COMMANDS = frozenset({"play"})
+_PROGRESS_TEXT = fmt.status("Searching for your track\u2026", "queue")
+
 
 class TelegramCommandWrapper:
     """Preserve event context, reject forwards, and dispatch each message once.
@@ -42,7 +47,8 @@ class TelegramCommandWrapper:
             return
         if not self.commands.is_operator(event.sender_id):
             return
-        if self.commands.parse(event.raw_text or "", event.sender_id) is None:
+        parsed = self.commands.parse(event.raw_text or "", event.sender_id)
+        if parsed is None:
             return
         if event.chat_id is None:
             return
@@ -54,6 +60,11 @@ class TelegramCommandWrapper:
         while len(self._seen) > 2048:
             self._seen.popitem(last=False)
         async with self._locks.setdefault(int(event.chat_id), asyncio.Lock()):
+            # For slow commands, show a status message immediately and edit it in
+            # place with the outcome, so /play never looks unresponsive.
+            progress = None
+            if parsed.name in _PROGRESS_COMMANDS:
+                progress = await self._send_progress(event)
             try:
                 async with asyncio.timeout(90):
                     reply = await self.commands.dispatch(
@@ -65,7 +76,9 @@ class TelegramCommandWrapper:
                     )
             except FloodWaitError as exc:
                 log.warning("Telegram requested a command cooldown of %s seconds", exc.seconds)
-                return
+                reply = fmt.error("Telegram asked Parlay to slow down. Try that again shortly.")
+                if progress is None:
+                    return
             except MediaError:
                 log.warning("Media resolution or playback failed", exc_info=True)
                 reply = fmt.error(
@@ -79,8 +92,25 @@ class TelegramCommandWrapper:
                 log.exception("Command failed")
                 reply = fmt.error("The command failed. Check the Parlay service log.")
             if reply is not None:
-                try:
-                    sent = await event.reply(reply)
-                    self._seen[(int(event.chat_id), int(sent.id))] = None
-                except RPCError:
-                    log.warning("Cannot send command response", exc_info=True)
+                await self._deliver(event, progress, reply)
+
+    async def _send_progress(self, event: Any) -> Any | None:
+        """Post the live status message over the userbot client, or None if it fails."""
+        try:
+            message = await event.reply(_PROGRESS_TEXT)
+        except RPCError:
+            log.warning("Cannot send command progress message", exc_info=True)
+            return None
+        self._seen[(int(event.chat_id), int(message.id))] = None
+        return message
+
+    async def _deliver(self, event: Any, progress: Any | None, reply: str) -> None:
+        """Edit the live status message in place, or send a fresh reply if there is none."""
+        try:
+            if progress is not None:
+                await progress.edit(reply)
+                return
+            sent = await event.reply(reply)
+            self._seen[(int(event.chat_id), int(sent.id))] = None
+        except RPCError:
+            log.warning("Cannot send command response", exc_info=True)
