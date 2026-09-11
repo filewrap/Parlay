@@ -118,7 +118,7 @@ def test_invidious_bitrate_ranking() -> None:
     resolved = client._invidious_stream("https://inv", "abcdefghijk")
     assert resolved is not None
     assert resolved.stream.stream_url == "high"
-    assert resolved.stream.source is MediaSource.PIPED or resolved.stream.source is MediaSource.INVIDIOUS
+    assert resolved.stream.source is MediaSource.INVIDIOUS
     assert resolved.title == "Song"
     assert resolved.duration_s == 210.0
 
