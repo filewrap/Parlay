@@ -1,0 +1,51 @@
+name: apply-bot-buttons
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-bot-buttons.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply-bot-buttons:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg > /dev/null
+      - name: Install project
+        run: pip install -e '.[dev]' -q
+      - name: Apply bot.py changes
+        run: python .github/scripts/apply_bot_buttons.py
+      - name: Auto-format
+        run: ruff format src/parlay/bot.py
+      - name: Lint
+        run: ruff check .
+      - name: Format check
+        run: ruff format --check .
+      - name: Types
+        run: mypy
+      - name: Tests
+        run: pytest -q
+      - name: Commit changes
+        run: |
+          git config user.name kei
+          git config user.email xkailashhh@gmail.com
+          git add src/parlay/bot.py
+          if ! git diff --cached --quiet; then
+            git commit -m 'feat: companion bot playback control buttons (pause/resume/skip)'
+            git push origin main
+          else
+            echo 'no changes to commit'
+            exit 1
+          fi
