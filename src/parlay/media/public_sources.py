@@ -1,10 +1,21 @@
 """Cookieless media search and stream resolution via public front-ends.
 
 Public YouTube front-ends (Invidious and Piped) expose plain HTTP JSON APIs that
-return video metadata and direct audio-stream URLs without cookies, sign-in, or
+return video metadata and audio-stream URLs without cookies, sign-in, or
 proof-of-origin tokens. This is the primary, cookieless path for Source
-Resolution: it never touches yt-dlp and does not depend on the requesting IP's
-standing with YouTube's bot checks, only on a reachable public instance.
+Resolution: it never touches yt-dlp.
+
+A flagged datacenter IP cannot fetch YouTube media directly, so we ask Invidious
+to proxy the stream through its own IP (``local=true``); the returned playback
+URL then points at the instance, not ``googlevideo.com``. Piped already returns
+proxied URLs. This is what lets cookieless playback work from an IP that YouTube
+has flagged, provided the chosen instance is healthy and exposes its API.
+
+Public instances increasingly disable their public API to avoid Google's
+blocklists, so the built-in defaults are best-effort only. The operator should
+point Parlay at a working (ideally self-hosted) instance through the
+``PARLAY_INVIDIOUS`` and ``PARLAY_PIPED`` environment variables, each a
+comma-separated list of base URLs tried in order with rotation on failure.
 
 Each call tries the configured instances in order and rotates past any that are
 unreachable, blocked, or return no usable data, so a single instance outage does
@@ -17,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -30,18 +42,33 @@ log = logging.getLogger(__name__)
 _TIMEOUT_S = 8.0
 _USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) parlay/0.2"
 
-# Public instances, tried in order with rotation on failure. Overridable so the
-# operator can point at self-hosted or nearer instances for latency/reliability.
+# Best-effort defaults. Public instances often disable their API, so the
+# operator should override these via PARLAY_INVIDIOUS / PARLAY_PIPED (a
+# comma-separated list of base URLs). Overridable so the operator can point at
+# self-hosted or nearer instances for reliability and standing with YouTube.
 DEFAULT_INVIDIOUS: tuple[str, ...] = (
-    "https://yewtu.be",
     "https://invidious.nerdvpn.de",
     "https://inv.nadeko.net",
+    "https://invidious.f5.si",
+    "https://iv.ggtyler.dev",
 )
 DEFAULT_PIPED: tuple[str, ...] = (
     "https://pipedapi.kavin.rocks",
     "https://pipedapi.adminforge.de",
-    "https://api.piped.yt",
+    "https://pipedapi.reallyaweso.me",
 )
+
+_ENV_INVIDIOUS = "PARLAY_INVIDIOUS"
+_ENV_PIPED = "PARLAY_PIPED"
+
+
+def _from_env(name: str, fallback: tuple[str, ...]) -> tuple[str, ...]:
+    """Read a comma-separated instance list from the environment, or fall back."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return fallback
+    parsed = tuple(part.strip() for part in raw.split(",") if part.strip())
+    return parsed or fallback
 
 
 @dataclass(frozen=True)
@@ -75,18 +102,27 @@ def _video_id_from_watch(path: str) -> str | None:
     return candidate if len(candidate) == 11 else None
 
 
+def _absolutise(base: str, url: str) -> str:
+    """Resolve a possibly-relative proxied playback URL against the instance base."""
+    return urllib.parse.urljoin(f"{base}/", url)
+
+
 class PublicSourceClient:
     """Search and resolve audio streams over Invidious and Piped HTTP APIs."""
 
     def __init__(
         self,
         *,
-        invidious: tuple[str, ...] = DEFAULT_INVIDIOUS,
-        piped: tuple[str, ...] = DEFAULT_PIPED,
+        invidious: tuple[str, ...] | None = None,
+        piped: tuple[str, ...] | None = None,
         timeout_s: float = _TIMEOUT_S,
     ) -> None:
-        self._invidious = tuple(base.rstrip("/") for base in invidious)
-        self._piped = tuple(base.rstrip("/") for base in piped)
+        chosen_invidious = invidious if invidious is not None else _from_env(
+            _ENV_INVIDIOUS, DEFAULT_INVIDIOUS
+        )
+        chosen_piped = piped if piped is not None else _from_env(_ENV_PIPED, DEFAULT_PIPED)
+        self._invidious = tuple(base.rstrip("/") for base in chosen_invidious)
+        self._piped = tuple(base.rstrip("/") for base in chosen_piped)
         self._timeout_s = timeout_s
 
     async def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
@@ -160,7 +196,10 @@ class PublicSourceClient:
         return items
 
     def _invidious_stream(self, base: str, video_id: str) -> ResolvedStream | None:
-        data = self._get_json(f"{base}/api/v1/videos/{video_id}")
+        # local=true asks the instance to proxy the media through its own IP, so
+        # the playback URL points at the instance rather than googlevideo.com.
+        # That is what makes playback possible from an IP YouTube has flagged.
+        data = self._get_json(f"{base}/api/v1/videos/{video_id}?local=true")
         best_url: str | None = None
         best_abr = -1.0
         for fmt in data.get("adaptiveFormats") or []:
@@ -176,7 +215,7 @@ class PublicSourceClient:
             return None
         stream = StreamSource(
             source=MediaSource.INVIDIOUS,
-            stream_url=best_url,
+            stream_url=_absolutise(base, best_url),
             abr=best_abr if best_abr >= 0 else None,
         )
         return ResolvedStream(
