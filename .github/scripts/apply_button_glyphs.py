@@ -1,9 +1,14 @@
-"""Idempotent, anchor-based patch: give the control buttons transport glyphs.
+"""Idempotent, anchor-based patches applied in CI.
 
-Telegram Bot API inline buttons cannot be recoloured, so the buttons get visual
-distinction from the same monochrome transport glyphs the rest of Parlay uses
-(presentation.ICONS): pause U+23F8, play U+25B6, skip U+23ED. Applied as string
-replacements so the large bot.py never has to be rebuilt byte-for-byte.
+1. Give the control buttons transport glyphs. Telegram Bot API inline buttons
+   cannot be recoloured, so the buttons get visual distinction from the same
+   monochrome transport glyphs the rest of Parlay uses (presentation.ICONS):
+   pause U+23F8, play U+25B6, skip U+23ED.
+2. Update the Invidious ranking test to expect the instance-absolute playback
+   URL that local=true proxying now produces.
+
+Applied as string replacements so the large bot.py never has to be rebuilt
+byte-for-byte.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ from pathlib import Path
 
 BOT = Path("src/parlay/bot.py")
 TEST = Path("tests/test_bot.py")
+MEDIA_TEST = Path("tests/test_media_sourcing.py")
 
 BOT_OLD = '        controls = (("Pause", "pause"), ("Resume", "resume"), ("Skip", "skip"))'
 BOT_NEW = (
@@ -29,6 +35,9 @@ TEST_NEW = (
     '    assert "Pause" in joined and "Skip" in joined and "Open room" in joined'
 )
 
+MEDIA_OLD = '    assert resolved.stream.stream_url == "high"'
+MEDIA_NEW = '    assert resolved.stream.stream_url == "https://inv/high"'
+
 
 def patch(path: Path, old: str, new: str) -> None:
     text = path.read_text(encoding="utf-8")
@@ -44,6 +53,7 @@ def patch(path: Path, old: str, new: str) -> None:
 def main() -> None:
     patch(BOT, BOT_OLD, BOT_NEW)
     patch(TEST, TEST_OLD, TEST_NEW)
+    patch(MEDIA_TEST, MEDIA_OLD, MEDIA_NEW)
 
 
 if __name__ == "__main__":
