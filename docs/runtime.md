@@ -1,6 +1,6 @@
 # Concurrent media runtime
 
-`parlay.runtime` is an integration-ready subsystem. `ParlayApp` does not use it yet.
+`ParlayApp` uses `parlay.runtime` for independent per-chat media sessions.
 
 ## Public API
 
@@ -27,7 +27,7 @@ one independent AI producer to each runtime.
 
 `call_id` is `None` when `join` returns. The parent already checks the active
 voice chat, so it must call `runtime.bind_call_id(input_group_call.id)` with the
-actual positive Telegram `InputGroupCall.id`. Rebinding the same ID is safe.
+actual signed 64-bit Telegram `InputGroupCall.id`, preserving negative values. Rebinding the same ID is safe.
 Binding another ID fails. The registry does not invent a call identifier and does
 not repeat the parent's active-call check. `generation` is the internal stale
 event discriminator.

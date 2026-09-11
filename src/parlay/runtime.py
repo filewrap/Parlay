@@ -84,8 +84,14 @@ class Runtime:
 
     def bind_call_id(self, call_id: int) -> None:
         """Bind the actual Telegram call ID supplied by the parent discovery layer."""
-        if isinstance(call_id, bool) or not isinstance(call_id, int) or call_id <= 0:
-            raise ValueError("call_id must be a positive Telegram call identifier")
+        # Telegram InputGroupCall.id is a signed 64-bit TL long. Preserve its sign.
+        if (
+            isinstance(call_id, bool)
+            or not isinstance(call_id, int)
+            or call_id == 0
+            or not -(2**63) <= call_id < 2**63
+        ):
+            raise ValueError("call_id must be a nonzero signed 64-bit Telegram call identifier")
         if self.call_id is not None and self.call_id != call_id:
             raise RuntimeError("runtime is already bound to a different Telegram call")
         self.call_id = call_id
