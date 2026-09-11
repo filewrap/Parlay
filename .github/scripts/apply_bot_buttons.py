@@ -16,14 +16,14 @@ replacements: list[tuple[str, str]] = []
 
 # 1) /play now attaches control buttons instead of only Open room.
 old_play = (
-    '        room = await self.play(sender.id, chat_id, args)\n'
-    '        await event.reply(\n'
+    "        room = await self.play(sender.id, chat_id, args)\n"
+    "        await event.reply(\n"
     '            "Playback updated.",\n'
     '            buttons=Button.url("Open room", self.room_url(str(room["id"]))),\n'
-    '        )\n'
+    "        )\n"
 )
 new_play = (
-    '        room = await self.play(sender.id, chat_id, args)\n'
+    "        room = await self.play(sender.id, chat_id, args)\n"
     '        buttons = await self._control_buttons(sender.id, str(room["id"]))\n'
     '        await event.reply("Playback updated.", buttons=buttons)\n'
 )
@@ -32,49 +32,49 @@ replacements.append((old_play, new_play))
 # 2) Route the new control callback kind.
 old_dispatch = (
     '            elif record["kind"] == "reentry":\n'
-    '                await self._approve_reentry(event, token, record)\n'
+    "                await self._approve_reentry(event, token, record)\n"
 )
 new_dispatch = (
     '            elif record["kind"] == "reentry":\n'
-    '                await self._approve_reentry(event, token, record)\n'
+    "                await self._approve_reentry(event, token, record)\n"
     '            elif record["kind"] == "control":\n'
-    '                await self._control(event, token, record)\n'
+    "                await self._control(event, token, record)\n"
 )
 replacements.append((old_dispatch, new_dispatch))
 
 # 3) Add the button builder and control handler ahead of _authorized.
-anchor = '    async def _authorized(self, user_id: int, chat_id: int) -> bool:\n'
+anchor = "    async def _authorized(self, user_id: int, chat_id: int) -> bool:\n"
 methods = (
-    '    async def _control_buttons(self, owner_id: int, room_id: str) -> list[list[Any]]:\n'
+    "    async def _control_buttons(self, owner_id: int, room_id: str) -> list[list[Any]]:\n"
     '        """Build owner-bound pause/resume/skip controls plus an Open room link."""\n'
     '        controls = (("Pause", "pause"), ("Resume", "resume"), ("Skip", "skip"))\n'
-    '        row = []\n'
-    '        for label, verb in controls:\n'
-    '            token = await asyncio.to_thread(\n'
-    '                self._state.callback,\n'
-    '                owner_id,\n'
+    "        row = []\n"
+    "        for label, verb in controls:\n"
+    "            token = await asyncio.to_thread(\n"
+    "                self._state.callback,\n"
+    "                owner_id,\n"
     '                "control",\n'
     '                {"room_id": room_id, "verb": verb},\n'
-    '            )\n'
-    '            row.append(Button.inline(label, self._callback_data(token)))\n'
+    "            )\n"
+    "            row.append(Button.inline(label, self._callback_data(token)))\n"
     '        return [row, [Button.url("Open room", self.room_url(room_id))]]\n'
-    '\n'
-    '    async def _control(self, event: Any, token: str, record: dict[str, Any]) -> None:\n'
+    "\n"
+    "    async def _control(self, event: Any, token: str, record: dict[str, Any]) -> None:\n"
     '        """Issue a room playback action for the pressing owner at the current revision."""\n'
     '        payload = record["payload"]\n'
     '        room_id = str(payload["room_id"])\n'
     '        verb = str(payload["verb"])\n'
     '        snapshot = await self.rooms.snapshot(room_id, record["owner_id"])\n'
-    '        await self.rooms.action(\n'
-    '            room_id,\n'
+    "        await self.rooms.action(\n"
+    "            room_id,\n"
     '            record["owner_id"],\n'
     '            f"bot-control:{token}",\n'
     '            int(snapshot["revision"]),\n'
-    '            verb,\n'
-    '            {},\n'
-    '        )\n'
+    "            verb,\n"
+    "            {},\n"
+    "        )\n"
     '        await event.answer(f"{verb.capitalize()} sent.")\n'
-    '\n'
+    "\n"
 )
 replacements.append((anchor, methods + anchor))
 

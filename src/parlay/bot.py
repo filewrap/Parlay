@@ -268,10 +268,38 @@ class CompanionBot:
             await event.reply("You are not authorized to control playback in this group.")
             return
         room = await self.play(sender.id, chat_id, args)
-        await event.reply(
-            "Playback updated.",
-            buttons=Button.url("Open room", self.room_url(str(room["id"]))),
+        buttons = await self._control_buttons(sender.id, str(room["id"]))
+        await event.reply("Playback updated.", buttons=buttons)
+
+    async def _control_buttons(self, owner_id: int, room_id: str) -> list[list[Any]]:
+        """Build owner-bound pause/resume/skip controls plus an Open room link."""
+        controls = (("Pause", "pause"), ("Resume", "resume"), ("Skip", "skip"))
+        row = []
+        for label, verb in controls:
+            token = await asyncio.to_thread(
+                self._state.callback,
+                owner_id,
+                "control",
+                {"room_id": room_id, "verb": verb},
+            )
+            row.append(Button.inline(label, self._callback_data(token)))
+        return [row, [Button.url("Open room", self.room_url(room_id))]]
+
+    async def _control(self, event: Any, token: str, record: dict[str, Any]) -> None:
+        """Issue a room playback action for the pressing owner at the current revision."""
+        payload = record["payload"]
+        room_id = str(payload["room_id"])
+        verb = str(payload["verb"])
+        snapshot = await self.rooms.snapshot(room_id, record["owner_id"])
+        await self.rooms.action(
+            room_id,
+            record["owner_id"],
+            f"bot-control:{token}",
+            int(snapshot["revision"]),
+            verb,
+            {},
         )
+        await event.answer(f"{verb.capitalize()} sent.")
 
     async def _authorized(self, user_id: int, chat_id: int) -> bool:
         if self.authority is not None:
@@ -357,6 +385,8 @@ class CompanionBot:
                 await self._feedback(event, token, record)
             elif record["kind"] == "reentry":
                 await self._approve_reentry(event, token, record)
+            elif record["kind"] == "control":
+                await self._control(event, token, record)
             else:
                 await event.answer("Unsupported action.", alert=True)
         except Exception as error:
