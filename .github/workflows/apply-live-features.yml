@@ -17,28 +17,29 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install project and tools
+      - name: Install ffmpeg
         run: |
-          python -m pip install --upgrade pip
-          pip install -e .
-          pip install ruff mypy pytest pytest-asyncio
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg > /dev/null
+      - name: Install project
+        run: pip install -e '.[dev]' -q
       - name: Apply patch
         run: python .github/scripts/apply_live_features.py
-      - name: Ruff format
+      - name: Ruff format app.py
         run: ruff format src/parlay/app.py
-      - name: Ruff check
-        run: ruff check src/parlay/app.py
-      - name: Ruff format check
+      - name: Lint
+        run: ruff check .
+      - name: Format check
         run: ruff format --check src/parlay/app.py
-      - name: Mypy
-        run: mypy src/parlay
+      - name: Types
+        run: mypy
       - name: Tests
         run: pytest -q
       - name: Commit result
         run: |
           git config user.name "kei"
           git config user.email "xkailashhh@gmail.com"
-          git add -A
+          git add src/parlay/app.py
           if git diff --cached --quiet; then
             echo "no changes to commit"
           else

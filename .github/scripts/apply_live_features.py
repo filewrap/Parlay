@@ -1,7 +1,9 @@
 """Idempotent patcher for app.py: instant /tem, _engage_ai helper, self-join filter.
 
-Run in CI once; deleted afterwards. Uses regex on method boundaries so it does
-not depend on internal whitespace of the target methods.
+Run once in CI, then deleted. Uses regex on method boundaries so it does not
+depend on the internal whitespace of the target methods. Generated methods use
+comments instead of docstrings so this file stays free of embedded triple
+quotes and passes ruff format.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ if "_engage_ai" in text:
     print("apply_live_features: already applied; nothing to do")
     sys.exit(0)
 
-NEW_LIVE = '''    async def _cmd_live(self, command: ParsedCommand) -> str:
+NEW_LIVE = """    async def _cmd_live(self, command: ParsedCommand) -> str:
         if not self.config.gemini_api_key and not self.config.gemini_live_token_url:
             return fmt.error(
                 "AI voice is disabled. Configure GEMINI_API_KEY or "
@@ -39,7 +41,7 @@ NEW_LIVE = '''    async def _cmd_live(self, command: ParsedCommand) -> str:
         return fmt.success("AI voice started in this chat.")
 
     def _build_session_config(self, chat_id: int) -> SessionConfiguration:
-        """Build the provider session config for a chat's selected voice preset."""
+        # Build the provider session config for a chat's selected voice preset.
         default = default_configuration()
         template = get_template(self._templates.get(chat_id, DEFAULT_TEMPLATE_INDEX))
         return SessionConfiguration(
@@ -50,13 +52,9 @@ NEW_LIVE = '''    async def _cmd_live(self, command: ParsedCommand) -> str:
         )
 
     async def _engage_ai(self, runtime: Any, config: SessionConfiguration) -> None:
-        """Build the voice provider stack, engage it, and start muted.
-
-        Shared by /live (first start) and /tem (live voice switch). The caller
-        owns session-state bookkeeping and user-facing messaging; on failure the
-        caller cleans up. Starts muted so the userbot transmits only while the AI
-        actually speaks (the reply-start hook unmutes per turn).
-        """
+        # Build the voice provider stack, engage it, and start muted. Shared by
+        # /live (first start) and /tem (live voice switch). The caller owns
+        # session-state bookkeeping and messaging and cleans up on failure.
 
         async def lost(reason: str) -> None:
             if self.registry.get(runtime.chat_id) is runtime:
@@ -107,9 +105,9 @@ NEW_LIVE = '''    async def _cmd_live(self, command: ParsedCommand) -> str:
         runtime.ai = ai
         # Start muted; the reply-start hook unmutes only while the AI speaks.
         self._spawn(runtime.bridge.mute())
-'''
+"""
 
-NEW_TEM = '''    async def _cmd_tem(self, command: ParsedCommand) -> str:
+NEW_TEM = """    async def _cmd_tem(self, command: ParsedCommand) -> str:
         chat_id = command.chat_id or 0
         arg = command.args.strip()
         if not arg:
@@ -149,11 +147,11 @@ NEW_TEM = '''    async def _cmd_tem(self, command: ParsedCommand) -> str:
             await self._notify_operator("AI voice failed while switching voice.")
             return fmt.error("Could not switch the voice; AI stopped. Start again with /live.")
         return fmt.success(f"Voice switched to {template.label} ({template.voice}).")
-'''
+"""
 
 live_pat = re.compile(
-    r"    async def _cmd_live\(self, command: ParsedCommand\) -> str:\n"
-    r".*?(?=\n    async def _cmd_tem\(self, command: ParsedCommand\) -> str:)",
+    r"    async def _cmd_live\\(self, command: ParsedCommand\\) -> str:\\n"
+    r".*?(?=\\n    async def _cmd_tem\\(self, command: ParsedCommand\\) -> str:)",
     re.DOTALL,
 )
 if not live_pat.search(text):
@@ -162,8 +160,8 @@ if not live_pat.search(text):
 text = live_pat.sub(lambda m: NEW_LIVE, text, count=1)
 
 tem_pat = re.compile(
-    r"    async def _cmd_tem\(self, command: ParsedCommand\) -> str:\n"
-    r".*?(?=\n    def _on_call_participant\(self, chat_id: int, action: str, user_id: int\) -> None:)",
+    r"    async def _cmd_tem\\(self, command: ParsedCommand\\) -> str:\\n"
+    r".*?(?=\\n    def _on_call_participant\\(self, chat_id: int, action: str, user_id: int\\) -> None:)",
     re.DOTALL,
 )
 if not tem_pat.search(text):
