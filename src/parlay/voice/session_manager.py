@@ -166,29 +166,35 @@ class ProviderSessionManager:
             self._source.unsubscribe(self._token)
             self._token = None
 
-    # --- speaker context -------------------------------------------------------
-    def note_speaker(self, name: str | None) -> None:
-        """Tell the provider who is currently speaking, best-effort.
+    # --- context injection -----------------------------------------------------
+    def note_context(self, text: str) -> None:
+        """Send arbitrary best-effort context text to the provider.
 
-        Multiple participants share one mixed input stream, so the model cannot
-        tell voices apart on its own. When the active speaker changes we send a
-        short text context naming them, so the model knows who it is replying to.
-        The provider may not support context text; failures are swallowed.
+        Used for roster and speaker awareness: multiple participants share one
+        mixed input stream, so the model cannot tell voices apart on its own.
+        The provider may not support context text; failures are swallowed and a
+        provider without `send_context` is a no-op.
         """
-        if not name or name == self._speaker or not self._engaged:
+        if not text or not self._engaged:
             return
-        self._speaker = name
         send = getattr(self._provider, "send_context", None)
         if send is None:
             return
 
         async def push() -> None:
             try:
-                await send(f"Abhi {name} bol rahe hain.")
+                await send(text)
             except Exception:
-                log.debug("failed to send speaker context", exc_info=True)
+                log.debug("failed to send context", exc_info=True)
 
         asyncio.get_event_loop().create_task(push())
+
+    def note_speaker(self, name: str | None) -> None:
+        """Tell the provider who is currently speaking, best-effort."""
+        if not name or name == self._speaker:
+            return
+        self._speaker = name
+        self.note_context(f"Abhi {name} bol rahe hain.")
 
     # --- Captured Stream consumer ----------------------------------------------
     async def _on_captured(self, chunk: AudioChunk) -> None:
@@ -251,18 +257,20 @@ class ProviderSessionManager:
             self._flush_prime()
 
     async def _begin_turn(self) -> None:
-        """Start a new reply turn: gap of silence, then begin priming."""
+        """Start a new reply turn: unmute, gap of silence, then begin priming."""
         self._turn_active = True
         self._primed = False
         self._prime_buf.clear()
-        gap = self._gap_bytes()
-        if gap:
-            self._emit(b"\x00" * gap)
+        # Signal reply start first so the app can unmute the outgoing stream
+        # before any audio is queued, avoiding a clipped opening.
         if self._on_reply_start is not None:
             try:
                 await self._on_reply_start()
             except Exception:
                 log.exception("reply-start hook failed")
+        gap = self._gap_bytes()
+        if gap:
+            self._emit(b"\x00" * gap)
 
     def _flush_prime(self) -> None:
         """Release any held pre-roll audio and switch to pass-through."""

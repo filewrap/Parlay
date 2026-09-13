@@ -62,6 +62,10 @@ class AiVoiceProducer:
         """Forward the current speaker's name to the provider as context."""
         self._pipeline.note_speaker(name)
 
+    def note_context(self, text: str) -> None:
+        """Forward arbitrary context (e.g. roster changes) to the provider."""
+        self._pipeline.note_context(text)
+
     async def engage(self) -> None:
         """Take the call output and open the provider session."""
         await self._arbiter.acquire(self)
