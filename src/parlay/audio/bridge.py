@@ -8,9 +8,9 @@ and producers enqueue into the Playback Sink.
 An unexpected call disconnect surfaces through `on_disconnect`: the native
 thread signals it and the bridge marshals it onto the asyncio loop so the
 session can be ended cleanly (REQ-BOT-006). Participant join/leave events
-surface through `on_participant` so the app can post an in-call join notice and
-track who is speaking. `mute()` / `unmute()` toggle the userbot's own outgoing
-stream.
+surface through `on_participant`, and the active speaker through `on_speaker`,
+so the app can post an in-call join notice and tell the model who is talking.
+`mute()` / `unmute()` toggle the userbot's own outgoing stream.
 """
 
 from __future__ import annotations
@@ -31,6 +31,8 @@ log = logging.getLogger(__name__)
 DisconnectCallback = Callable[[], Awaitable[None]]
 # (action, user_id): action is "joined" or "left".
 ParticipantCallback = Callable[[str, int], None]
+# (user_id,): the participant whose audio is currently arriving.
+SpeakerCallback = Callable[[int], None]
 
 
 class RawAudioBridge:
@@ -41,6 +43,7 @@ class RawAudioBridge:
         client: Any,
         on_disconnect: DisconnectCallback | None = None,
         on_participant: ParticipantCallback | None = None,
+        on_speaker: SpeakerCallback | None = None,
     ) -> None:
         resampler = AudioResampler()
         self._capture = AudioCaptureService(resampler=resampler)
@@ -53,6 +56,7 @@ class RawAudioBridge:
             on_played=self._playback.on_played_data,
             on_disconnect=self._handle_disconnect,
             on_participant=on_participant,
+            on_speaker=on_speaker,
         )
         self._active = False
 
