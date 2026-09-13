@@ -60,6 +60,13 @@ class FallbackVoiceProvider:
     async def send_audio(self, pcm: bytes) -> None:
         await self._require().send_audio(pcm)
 
+    async def send_context(self, text: str) -> None:
+        """Delegate context injection to the active provider if it supports it."""
+        active = self._require()
+        send = getattr(active, "send_context", None)
+        if send is not None:
+            await send(text)
+
     def events(self) -> AsyncIterator[ReplyEvent]:
         return self._require().events()
 

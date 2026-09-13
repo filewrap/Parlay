@@ -13,6 +13,9 @@ Wire contract (v1alpha, JSON frames):
     {"setupComplete": {}}.
   * Input: {"realtimeInput": {"mediaChunks": [{"mimeType":
     "audio/pcm;rate=16000", "data": "<base64 PCM>"}]}}.
+  * Context: {"clientContent": {"turns": [{"role": "user", "parts":
+    [{"text": "..."}]}], "turnComplete": false}} injects text without forcing a
+    reply.
   * Output: {"serverContent": {"modelTurn": {"parts": [{"inlineData":
     {"data": "<base64 PCM>"}}]}, "turnComplete": bool, "interrupted": bool}}.
   * Resumption: {"sessionResumptionUpdate": {"newHandle": "..."}} is persisted
@@ -184,6 +187,27 @@ class GeminiLiveSocket:
                 self._sent_chunks,
                 self._sent_bytes,
             )
+
+    async def send_context(self, text: str) -> None:
+        """Inject a text turn as context without forcing a reply.
+
+        `turnComplete` is false so the model incorporates the text (e.g. who is
+        now speaking) but does not treat it as a prompt to answer. Best-effort:
+        a send failure is swallowed and the receive loop owns reconnection.
+        """
+        ws = self._ws
+        if ws is None or self._closed or not text:
+            return
+        frame = {
+            "clientContent": {
+                "turns": [{"role": "user", "parts": [{"text": text}]}],
+                "turnComplete": False,
+            }
+        }
+        try:
+            await ws.send(json.dumps(frame))
+        except Exception:
+            log.debug("live socket context send failed", exc_info=True)
 
     # --- reply stream ---------------------------------------------------------
     async def events(self) -> AsyncIterator[ReplyEvent]:
