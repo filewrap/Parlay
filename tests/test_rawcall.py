@@ -2,7 +2,7 @@
 
 The real binding is replaced with fakes shaped exactly like the verified
 py-tgcalls 2.3.x surface: PyTgCalls(client), start, resolve_chat_id, play,
-record, send_frame, add_handler/remove_handler, leave_call, and the
+record, send_frame, add_handler/remove_handler, leave_call, mute/unmute, and the
 StreamFrames / ChatUpdate update types with Flag semantics.
 """
 
@@ -83,6 +83,20 @@ class ChatUpdate(Update):
         self.status = status
 
 
+class Action:
+    """Participant-update action with a .name, matching pytgcalls enums."""
+
+    def __init__(self, name):
+        self.name = name
+
+
+class UpdatedGroupCallParticipant(Update):
+    def __init__(self, chat_id, action_name, user_id):
+        super().__init__(chat_id)
+        self.action = Action(action_name)
+        self.participant = SimpleNamespace(user_id=user_id)
+
+
 class FakePyTgCalls:
     def __init__(self, client):
         self.client = client
@@ -92,6 +106,8 @@ class FakePyTgCalls:
         self.record_calls: list = []
         self.sent_frames: list = []
         self.left: list = []
+        self.mute_calls: list = []
+        self.unmute_calls: list = []
 
     async def start(self):
         self.started = True
@@ -118,6 +134,12 @@ class FakePyTgCalls:
     async def leave_call(self, chat_id):
         self.left.append(chat_id)
 
+    async def mute(self, chat_id):
+        self.mute_calls.append(chat_id)
+
+    async def unmute(self, chat_id):
+        self.unmute_calls.append(chat_id)
+
 
 def _fake_api() -> SimpleNamespace:
     return SimpleNamespace(
@@ -141,6 +163,7 @@ def adapter_env(monkeypatch):
     recorded: list[tuple[bytes, int]] = []
     played: list[int] = []
     disconnects: list[bool] = []
+    participants: list[tuple[str, int]] = []
 
     def on_recorded(data: bytes, length: int) -> None:
         recorded.append((data, length))
@@ -154,12 +177,14 @@ def adapter_env(monkeypatch):
         on_recorded=on_recorded,
         on_played=on_played,
         on_disconnect=lambda: disconnects.append(True),
+        on_participant=lambda action, uid: participants.append((action, uid)),
     )
     return SimpleNamespace(
         adapter=adapter,
         recorded=recorded,
         played=played,
         disconnects=disconnects,
+        participants=participants,
     )
 
 
@@ -206,6 +231,38 @@ async def test_incoming_frames_forwarded_per_frame(adapter_env):
     # Outgoing echoes are ignored.
     await handler(app, StreamFrames(-100123, Direction.OUTGOING, Device.MICROPHONE, frames))
     assert len(adapter_env.recorded) == 2
+    await adapter_env.adapter.stop()
+
+
+async def test_incoming_microphone_frames_are_forwarded(adapter_env):
+    # NTgCalls tags participant audio as MICROPHONE; it must still be forwarded.
+    app = await _start(adapter_env)
+    handler = app.handlers[0]
+    frames = [FakeFrame(b"cc")]
+    await handler(app, StreamFrames(-100123, Direction.INCOMING, Device.MICROPHONE, frames))
+    assert adapter_env.recorded == [(b"cc", 2)]
+    await adapter_env.adapter.stop()
+
+
+async def test_self_mute_and_unmute_drive_engine_once_per_change(adapter_env):
+    app = await _start(adapter_env)
+    await adapter_env.adapter.mute()
+    await adapter_env.adapter.mute()  # already muted: no second call
+    assert app.mute_calls == [-100123]
+    await adapter_env.adapter.unmute()
+    await adapter_env.adapter.unmute()  # already unmuted
+    assert app.unmute_calls == [-100123]
+    await adapter_env.adapter.stop()
+
+
+async def test_participant_join_and_leave_are_forwarded(adapter_env):
+    app = await _start(adapter_env)
+    handler = app.handlers[0]
+    await handler(app, UpdatedGroupCallParticipant(-100123, "JOINED", 555))
+    await handler(app, UpdatedGroupCallParticipant(-100123, "LEFT", 555))
+    # Another chat is ignored.
+    await handler(app, UpdatedGroupCallParticipant(-999, "JOINED", 42))
+    assert adapter_env.participants == [("joined", 555), ("left", 555)]
     await adapter_env.adapter.stop()
 
 
