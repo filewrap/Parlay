@@ -93,6 +93,16 @@ class FakeBridge:
         self.interrupts += 1
 
 
+def _reply_pcm(bridge: FakeBridge) -> bytes:
+    """Concatenate played PCM and drop the leading silence gap.
+
+    Each turn is led by a gap of S16LE silence; the model audio in these tests
+    is non-zero, so stripping leading NUL bytes leaves just the reply audio.
+    """
+    joined = b"".join(chunk.pcm for chunk in bridge.played)
+    return joined.lstrip(b"\x00")
+
+
 def test_fake_provider_satisfies_interface() -> None:
     assert isinstance(FakeProvider([]), VoiceProvider)
 
@@ -138,17 +148,35 @@ async def test_captured_audio_is_forwarded_to_provider() -> None:
 
 
 async def test_reply_audio_is_played_at_output_rate_mono() -> None:
-    provider = FakeProvider([ReplyEvent.audio(b"\x02\x00" * 240)])
+    # The turn's audio is held as pre-roll and released when the turn completes.
+    audio = b"\x02\x00" * 240
+    provider = FakeProvider([ReplyEvent.audio(audio), ReplyEvent.turn_complete()])
     bridge = FakeBridge()
     mgr = ProviderSessionManager(provider, bridge, bridge)
     await mgr.engage()
     try:
         await asyncio.sleep(0.02)  # let the drain task run
-        assert len(bridge.played) == 1
-        chunk = bridge.played[0]
-        assert chunk.rate == 24_000
-        assert chunk.channels == 1
-        assert chunk.pcm == b"\x02\x00" * 240
+        assert bridge.played  # gap + released audio
+        for chunk in bridge.played:
+            assert chunk.rate == 24_000
+            assert chunk.channels == 1
+        assert _reply_pcm(bridge) == audio
+    finally:
+        await mgr.disengage()
+
+
+async def test_turn_leads_with_a_silence_gap() -> None:
+    audio = b"\x02\x00" * 240
+    provider = FakeProvider([ReplyEvent.audio(audio), ReplyEvent.turn_complete()])
+    bridge = FakeBridge()
+    mgr = ProviderSessionManager(provider, bridge, bridge)
+    await mgr.engage()
+    try:
+        await asyncio.sleep(0.02)
+        joined = b"".join(chunk.pcm for chunk in bridge.played)
+        # A leading run of silence precedes the model audio.
+        assert joined.startswith(b"\x00\x00")
+        assert len(joined) > len(audio)
     finally:
         await mgr.disengage()
 
@@ -172,9 +200,62 @@ async def test_turn_complete_does_not_flush() -> None:
     await mgr.engage()
     try:
         await asyncio.sleep(0.02)
-        assert len(bridge.played) == 1
+        assert bridge.played  # audio released on turn complete
         # disengage() flushes once on teardown; no flush from turn_complete itself
         assert bridge.interrupts == 0
+    finally:
+        await mgr.disengage()
+
+
+async def test_reply_boundary_hooks_fire_once_per_turn() -> None:
+    provider = FakeProvider(
+        [
+            ReplyEvent.audio(b"\x02\x00" * 8),
+            ReplyEvent.audio(b"\x02\x00" * 8),
+            ReplyEvent.turn_complete(),
+        ]
+    )
+    bridge = FakeBridge()
+    starts = 0
+    ends = 0
+
+    async def on_start() -> None:
+        nonlocal starts
+        starts += 1
+
+    async def on_end() -> None:
+        nonlocal ends
+        ends += 1
+
+    mgr = ProviderSessionManager(
+        provider, bridge, bridge, on_reply_start=on_start, on_reply_end=on_end
+    )
+    await mgr.engage()
+    try:
+        await asyncio.sleep(0.02)
+        assert starts == 1
+        assert ends == 1
+    finally:
+        await mgr.disengage()
+
+
+async def test_note_speaker_forwards_context_when_supported() -> None:
+    contexts: list[str] = []
+
+    class ContextProvider(FakeProvider):
+        async def send_context(self, text: str) -> None:
+            contexts.append(text)
+
+    provider = ContextProvider([])
+    bridge = FakeBridge()
+    mgr = ProviderSessionManager(provider, bridge, bridge)
+    await mgr.engage()
+    try:
+        mgr.note_speaker("Asha")
+        mgr.note_speaker("Asha")  # same speaker: no duplicate context
+        await asyncio.sleep(0.02)
+        assert len(contexts) == 1
+        assert "Asha" in contexts[0]
     finally:
         await mgr.disengage()
 
