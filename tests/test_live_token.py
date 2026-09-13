@@ -17,11 +17,21 @@ class _Resp:
     def read(self) -> bytes:
         return self._b
 
-    def __enter__(self) -> _Resp:
+    def __enter__(self) -> "_Resp":
         return self
 
     def __exit__(self, *a: object) -> bool:
         return False
+
+
+class _FakeOpener:
+    def __init__(self, body: str) -> None:
+        self._body = body
+        self.opened: list[object] = []
+
+    def open(self, request, timeout=None):
+        self.opened.append(request)
+        return _Resp(self._body)
 
 
 @pytest.mark.asyncio
@@ -56,15 +66,34 @@ async def test_token_refetched_after_invalidate_or_force(monkeypatch):
 
 
 def test_fetch_reads_configured_field(monkeypatch):
-    monkeypatch.setattr(
-        urllib.request, "urlopen", lambda *a, **k: _Resp(json.dumps({"token": "abc"}))
-    )
-    src = EphemeralTokenSource("https://x", field="token")
+    fake = _FakeOpener(json.dumps({"token": "abc"}))
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *a, **k: fake)
+    src = EphemeralTokenSource("https://x/api/live-token", field="token")
     assert src._fetch() == "abc"
 
 
 def test_fetch_missing_field_raises(monkeypatch):
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Resp(json.dumps({"nope": 1})))
+    fake = _FakeOpener(json.dumps({"nope": 1}))
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *a, **k: fake)
     src = EphemeralTokenSource("https://x")
     with pytest.raises(TokenError):
         src._fetch()
+
+
+def test_fetch_warms_up_before_posting(monkeypatch):
+    fake = _FakeOpener(json.dumps({"token": "abc"}))
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *a, **k: fake)
+    src = EphemeralTokenSource("https://x/api/live-token", warmup_url="https://x/live")
+    assert src._fetch() == "abc"
+    assert len(fake.opened) == 2
+    assert fake.opened[0].full_url == "https://x/live"
+    assert fake.opened[1].full_url == "https://x/api/live-token"
+
+
+def test_headers_include_browser_mimicry():
+    src = EphemeralTokenSource("https://host.example/api/live-token")
+    headers = src._headers()
+    assert headers["origin"] == "https://host.example"
+    assert headers["x-requested-with"] == "com.lnkofficial.luviai"
+    assert headers["sec-fetch-mode"] == "cors"
+    assert "user-agent" in headers
