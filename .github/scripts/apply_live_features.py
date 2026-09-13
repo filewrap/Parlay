@@ -123,11 +123,11 @@ ap = patch(
 
 ap = patch(
     ap,
-    '        async def speaking() -> None:\n'
+    "        async def speaking() -> None:\n"
     "            await self.vc.send_call_message(\n"
     '                runtime.chat_id, fmt.status("AI voice is speaking.", "speaking")\n'
     "            )\n",
-    '        async def speaking() -> None:\n'
+    "        async def speaking() -> None:\n"
     "            await self.vc.send_call_message(\n"
     '                runtime.chat_id, fmt.status("AI voice is speaking.", "speaking")\n'
     "            )\n"

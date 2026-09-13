@@ -19,7 +19,13 @@ from parlay.runtime import (
 class FakeBridge:
     starts = 0
 
-    def __init__(self, client: object, on_disconnect=None) -> None:
+    def __init__(
+        self,
+        client: object,
+        on_disconnect=None,
+        on_participant=None,
+        on_speaker=None,
+    ) -> None:
         self.active = False
         self.on_disconnect = on_disconnect
         self.stops = 0

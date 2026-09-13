@@ -178,9 +178,7 @@ class RawCallAdapter:
                 await app.leave_call(chat_id)
         except Exception:
             log.warning("leave_call failed; probably already out of the call", exc_info=True)
-        log.info(
-            "left group call %s (forwarded %d inbound frames)", chat_id, self._recorded_frames
-        )
+        log.info("left group call %s (forwarded %d inbound frames)", chat_id, self._recorded_frames)
 
     # --- self-mute ------------------------------------------------------------
     async def mute(self) -> None:

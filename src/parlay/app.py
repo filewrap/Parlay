@@ -36,6 +36,12 @@ from .voice.gemini import GeminiVoiceProvider, default_configuration
 from .voice.gemini_ws import GeminiLiveSocket
 from .voice.live_token import EphemeralTokenSource
 from .voice.provider import SessionConfiguration
+from .voice.templates import (
+    DEFAULT_TEMPLATE_INDEX,
+    describe_templates,
+    get_template,
+    template_count,
+)
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +80,9 @@ class ParlayApp:
         self._server: Any = None
         self._people: dict[tuple[int, int], tuple[float, Any]] = {}
         self._people_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self._templates: dict[int, int] = {}
+        self.registry.on_participant = self._on_call_participant
+        self.registry.on_speaker = self._on_call_speaker
         for name in (
             "join",
             "leave",
@@ -89,6 +98,7 @@ class ParlayApp:
             "pause",
             "resume",
             "queue",
+            "tem",
         ):
             self.commands.register(name, getattr(self, f"_cmd_{name}"))
 
@@ -332,10 +342,11 @@ class ParlayApp:
             return fmt.warning("AI is already running here.")
         runtime.sessions.engage_ai()
         default = default_configuration()
+        template = get_template(self._templates.get(runtime.chat_id, DEFAULT_TEMPLATE_INDEX))
         config = SessionConfiguration(
             model=self.config.gemini_model or default.model,
-            system_instruction=self.config.gemini_persona or default.system_instruction,
-            voice=self.config.gemini_voice or default.voice,
+            system_instruction=template.system_instruction(),
+            voice=template.voice,
             response_modality=default.response_modality,
         )
 
@@ -350,6 +361,14 @@ class ParlayApp:
             await self.vc.send_call_message(
                 runtime.chat_id, fmt.status("AI voice is speaking.", "speaking")
             )
+
+        async def reply_start() -> None:
+            # Unmute so the AI reply is transmitted while it speaks.
+            await runtime.bridge.unmute()
+
+        async def reply_end() -> None:
+            # Mute between turns so participants do not hear dead air.
+            await runtime.bridge.mute()
 
         ws_provider = (
             GeminiLiveSocket(
@@ -373,6 +392,8 @@ class ParlayApp:
             arbiter=runtime.arbiter,
             on_loss=lost,
             on_speaking=speaking,
+            on_reply_start=reply_start,
+            on_reply_end=reply_end,
         )
         try:
             await ai.engage()
@@ -380,8 +401,71 @@ class ParlayApp:
             runtime.sessions.disengage_ai()
             raise
         runtime.ai = ai
+        # Start muted; the reply-start hook unmutes only while the AI speaks.
+        self._spawn(runtime.bridge.mute())
         self._spawn(self.vc.send_call_message(runtime.chat_id, fmt.success("AI voice started.")))
         return fmt.success("AI voice started in this chat.")
+
+    async def _cmd_tem(self, command: ParsedCommand) -> str:
+        chat_id = command.chat_id or 0
+        arg = command.args.strip()
+        if not arg:
+            current = self._templates.get(chat_id, DEFAULT_TEMPLATE_INDEX)
+            return fmt.status(
+                f"Voice templates (current: {current}):\n{describe_templates()}\n"
+                f"Switch with /tem <1-{template_count()}>.",
+                "info",
+            )
+        if not arg.isdigit() or not 1 <= int(arg) <= template_count():
+            return fmt.error(f"Pick a template from 1 to {template_count()}.")
+        index = int(arg)
+        self._templates[chat_id] = index
+        template = get_template(index)
+        runtime = self.registry.get(chat_id)
+        note = ""
+        if runtime is not None and runtime.ai is not None:
+            note = " Restart AI with /stop then /live to apply it."
+        return fmt.success(
+            f"Voice template {index} set: {template.label} ({template.voice}).{note}"
+        )
+
+    def _on_call_participant(self, chat_id: int, action: str, user_id: int) -> None:
+        if action == "joined":
+            self._spawn(self._announce_join(chat_id, user_id))
+
+    def _on_call_speaker(self, chat_id: int, user_id: int) -> None:
+        self._spawn(self._note_speaker(chat_id, user_id))
+
+    async def _announce_join(self, chat_id: int, user_id: int) -> None:
+        name = await self._display_name(user_id, chat_id)
+        await self.vc.send_call_message(
+            chat_id, fmt.status(f"{name} joined the voice chat.", "connected")
+        )
+        runtime = self.registry.get(chat_id)
+        if runtime is not None and runtime.ai is not None:
+            runtime.ai.note_context(f"{name} abhi voice chat mein aaye hain.")
+
+    async def _note_speaker(self, chat_id: int, user_id: int) -> None:
+        runtime = self.registry.get(chat_id)
+        if runtime is None or runtime.ai is None:
+            return
+        name = await self._display_name(user_id, chat_id)
+        runtime.ai.note_speaker(name)
+
+    async def _display_name(self, user_id: int, chat_id: int) -> str:
+        candidates = [self.client]
+        if self.bot is not None and self.bot.client is not None:
+            candidates.append(self.bot.client)
+        for client in candidates:
+            try:
+                user = await client.get_entity(user_id)
+            except Exception:
+                continue
+            for attr in ("first_name", "username", "title"):
+                value = getattr(user, attr, None)
+                if value:
+                    return str(value)
+        return str(user_id)
 
     async def _participant(self, user_id: int, chat_id: int) -> Any:
         key = (chat_id, user_id)

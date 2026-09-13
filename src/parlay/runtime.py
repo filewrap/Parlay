@@ -215,6 +215,10 @@ class RuntimeRegistry:
         self._closed = False
         self._store = _SnapshotStore(getattr(config, "activity_db_path", None))
         self._callback_tasks: set[asyncio.Task[None]] = set()
+        # Optional parent hooks bound to a chat id in _build: in-call
+        # participant (join/leave) and active-speaker events.
+        self.on_participant: Callable[[int, str, int], None] | None = None
+        self.on_speaker: Callable[[int, int], None] | None = None
 
     def get(self, chat_id: int) -> Runtime | None:
         return self._runtimes.get(chat_id)
@@ -315,7 +319,20 @@ class RuntimeRegistry:
             if current is not None and current.generation == generation:
                 await self.leave(chat_id, "transport_disconnected")
 
-        bridge = RawAudioBridge(self._client, on_disconnect=disconnected)
+        def participant(action: str, user_id: int) -> None:
+            if self.on_participant is not None:
+                self.on_participant(chat_id, action, user_id)
+
+        def speaker(user_id: int) -> None:
+            if self.on_speaker is not None:
+                self.on_speaker(chat_id, user_id)
+
+        bridge = RawAudioBridge(
+            self._client,
+            on_disconnect=disconnected,
+            on_participant=participant,
+            on_speaker=speaker,
+        )
         try:
             await bridge.start(entity)
         except BaseException:

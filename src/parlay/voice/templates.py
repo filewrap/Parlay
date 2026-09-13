@@ -109,6 +109,4 @@ def get_template(index: int) -> VoiceTemplate:
 
 def describe_templates() -> str:
     """A one-line-per-template summary for operator messages."""
-    return "\n".join(
-        f"{i}. {t.label} ({t.voice})" for i, t in enumerate(TEMPLATES, start=1)
-    )
+    return "\n".join(f"{i}. {t.label} ({t.voice})" for i, t in enumerate(TEMPLATES, start=1))

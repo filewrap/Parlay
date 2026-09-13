@@ -301,9 +301,7 @@ class ProviderSessionManager:
         The Playback Service resampler up-converts to the 48 kHz call boundary
         (AC-AIVP-003.2 / AC-INJ-002.2).
         """
-        self._sink.play_chunk(
-            AudioChunk(pcm=pcm, rate=self._provider.output_rate, channels=1)
-        )
+        self._sink.play_chunk(AudioChunk(pcm=pcm, rate=self._provider.output_rate, channels=1))
 
     def _prime_bytes(self) -> int:
         return _ms_to_bytes(self._provider.output_rate, _PRIME_MS)
