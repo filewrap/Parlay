@@ -55,8 +55,8 @@ class Update:
 
 
 class FakeFrame:
-    def __init__(self, data: bytes):
-        self.ssrc = 1
+    def __init__(self, data: bytes, ssrc: int = 1):
+        self.ssrc = ssrc
         self.frame = data
 
 
@@ -91,10 +91,10 @@ class Action:
 
 
 class UpdatedGroupCallParticipant(Update):
-    def __init__(self, chat_id, action_name, user_id):
+    def __init__(self, chat_id, action_name, user_id, source=None):
         super().__init__(chat_id)
         self.action = Action(action_name)
-        self.participant = SimpleNamespace(user_id=user_id)
+        self.participant = SimpleNamespace(user_id=user_id, source=source)
 
 
 class FakePyTgCalls:
@@ -164,6 +164,7 @@ def adapter_env(monkeypatch):
     played: list[int] = []
     disconnects: list[bool] = []
     participants: list[tuple[str, int]] = []
+    speakers: list[int] = []
 
     def on_recorded(data: bytes, length: int) -> None:
         recorded.append((data, length))
@@ -178,6 +179,7 @@ def adapter_env(monkeypatch):
         on_played=on_played,
         on_disconnect=lambda: disconnects.append(True),
         on_participant=lambda action, uid: participants.append((action, uid)),
+        on_speaker=lambda uid: speakers.append(uid),
     )
     return SimpleNamespace(
         adapter=adapter,
@@ -185,6 +187,7 @@ def adapter_env(monkeypatch):
         played=played,
         disconnects=disconnects,
         participants=participants,
+        speakers=speakers,
     )
 
 
@@ -263,6 +266,28 @@ async def test_participant_join_and_leave_are_forwarded(adapter_env):
     # Another chat is ignored.
     await handler(app, UpdatedGroupCallParticipant(-999, "JOINED", 42))
     assert adapter_env.participants == [("joined", 555), ("left", 555)]
+    await adapter_env.adapter.stop()
+
+
+async def test_active_speaker_detected_from_ssrc(adapter_env):
+    app = await _start(adapter_env)
+    handler = app.handlers[0]
+    # Learn two participants and their SSRCs.
+    await handler(app, UpdatedGroupCallParticipant(-100123, "JOINED", 111, source=900))
+    await handler(app, UpdatedGroupCallParticipant(-100123, "JOINED", 222, source=901))
+    # Audio from SSRC 900 -> user 111.
+    await handler(
+        app, StreamFrames(-100123, Direction.INCOMING, Device.MICROPHONE, [FakeFrame(b"a", 900)])
+    )
+    # More audio from the same speaker does not re-report.
+    await handler(
+        app, StreamFrames(-100123, Direction.INCOMING, Device.MICROPHONE, [FakeFrame(b"b", 900)])
+    )
+    # Speaker switches to user 222.
+    await handler(
+        app, StreamFrames(-100123, Direction.INCOMING, Device.MICROPHONE, [FakeFrame(b"c", 901)])
+    )
+    assert adapter_env.speakers == [111, 222]
     await adapter_env.adapter.stop()
 
 
