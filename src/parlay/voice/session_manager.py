@@ -6,6 +6,15 @@ provider's reply events into the Playback Sink. On disengage it detaches and
 closes the session. Interruptions flush pending playback immediately; an
 unrecoverable session loss reports to the Operator and disengages.
 
+Turn shaping (natural feel):
+  * Pre-roll priming. Native-audio replies arrive in bursts that can outrun the
+    fixed 10 ms playout callback, so the first words underrun the buffer and
+    sound shattered. The manager holds the first `_PRIME_MS` of a turn's audio
+    and releases it in one enqueue, giving the playout a cushion so the opening
+    words are smooth.
+  * Inter-turn gap. A short `_GAP_MS` of silence is prepended to each turn so the
+    AI does not start speaking on top of the user and the exchange feels paced.
+
 This module is provider-agnostic (talks to `VoiceProvider`) and bridge-agnostic
 (talks to the `CapturedSource` / `PlaybackSink` protocols), so it is fully unit
 testable with fakes. `RawAudioBridge` satisfies both protocols structurally.
@@ -33,9 +42,22 @@ LossHandler = Callable[[str], Awaitable[None]]
 # announce in-call that the AI is speaking (REQ-AIVP-008.1).
 SpeakingHandler = Callable[[], Awaitable[None]]
 
+# Called (unthrottled) on the first reply audio of every turn and again when the
+# turn ends or is interrupted. The app uses these to unmute the userbot while the
+# AI speaks and mute it in between, so participants do not hear dead air.
+ReplyBoundaryHandler = Callable[[], Awaitable[None]]
+
 # Minimum seconds between AI-speaking announcements within one engaged session,
 # so repeated turns do not flood the chat (REQ-AIVP-008.3).
 _SPEAKING_THROTTLE_S = 30.0
+
+# Milliseconds of reply audio to buffer before the first chunk of a turn is
+# allowed to play, so bursty early frames do not underrun the playout.
+_PRIME_MS = 320
+
+# Milliseconds of silence prepended to each turn so replies feel paced and do
+# not begin on top of the user.
+_GAP_MS = 200
 
 
 class CapturedSource(Protocol):
@@ -69,18 +91,28 @@ class ProviderSessionManager:
         sink: PlaybackSink,
         on_loss: LossHandler | None = None,
         on_speaking: SpeakingHandler | None = None,
+        on_reply_start: ReplyBoundaryHandler | None = None,
+        on_reply_end: ReplyBoundaryHandler | None = None,
     ) -> None:
         self._provider = provider
         self._source = source
         self._sink = sink
         self._on_loss = on_loss
         self._on_speaking = on_speaking
+        self._on_reply_start = on_reply_start
+        self._on_reply_end = on_reply_end
         self._token: int | None = None
         self._pump: asyncio.Task[None] | None = None
         self._engaged = False
         # Announcement throttle state (REQ-AIVP-008.1/.3).
         self._turn_announced = False
         self._last_announce: float | None = None
+        # Per-turn playout shaping state.
+        self._turn_active = False
+        self._primed = False
+        self._prime_buf = bytearray()
+        # Current speaker context already sent to the provider.
+        self._speaker: str | None = None
 
     @property
     def engaged(self) -> bool:
@@ -105,6 +137,7 @@ class ProviderSessionManager:
         self._token = self._source.subscribe(self._on_captured, self._provider.input_rate, 1)
         self._turn_announced = False
         self._last_announce = None
+        self._reset_turn()
         self._pump = asyncio.get_event_loop().create_task(self._drain_replies())
         self._engaged = True
         log.info("AI voice pipeline engaged")
@@ -132,6 +165,30 @@ class ProviderSessionManager:
         if self._token is not None:
             self._source.unsubscribe(self._token)
             self._token = None
+
+    # --- speaker context -------------------------------------------------------
+    def note_speaker(self, name: str | None) -> None:
+        """Tell the provider who is currently speaking, best-effort.
+
+        Multiple participants share one mixed input stream, so the model cannot
+        tell voices apart on its own. When the active speaker changes we send a
+        short text context naming them, so the model knows who it is replying to.
+        The provider may not support context text; failures are swallowed.
+        """
+        if not name or name == self._speaker or not self._engaged:
+            return
+        self._speaker = name
+        send = getattr(self._provider, "send_context", None)
+        if send is None:
+            return
+
+        async def push() -> None:
+            try:
+                await send(f"Abhi {name} bol rahe hain.")
+            except Exception:
+                log.debug("failed to send speaker context", exc_info=True)
+
+        asyncio.get_event_loop().create_task(push())
 
     # --- Captured Stream consumer ----------------------------------------------
     async def _on_captured(self, chunk: AudioChunk) -> None:
@@ -167,23 +224,84 @@ class ProviderSessionManager:
     async def _handle_event(self, event: ReplyEvent) -> None:
         if event.kind is ReplyEventKind.AUDIO:
             if event.pcm:
-                await self._announce_speaking()
-                # Mono reply PCM at the provider output rate; the Playback
-                # Service resampler up-converts to the 48 kHz call boundary
-                # (AC-AIVP-003.2 / AC-INJ-002.2).
-                self._sink.play_chunk(
-                    AudioChunk(pcm=event.pcm, rate=self._provider.output_rate, channels=1)
-                )
+                await self._on_turn_audio(event.pcm)
         elif event.kind is ReplyEventKind.INTERRUPTED:
             # Drop pending reply audio and stop playback at once
             # (REQ-AIVP-004 / REQ-INJ-003).
-            self._turn_announced = False
             self._sink.interrupt()
+            await self._end_turn()
         elif event.kind is ReplyEventKind.TURN_COMPLETE:
             # Segment boundary; buffer drains to silence on its own
-            # (AC-AIVP-003.3 / AC-INJ-002.3). Nothing to flush.
-            self._turn_announced = False
+            # (AC-AIVP-003.3 / AC-INJ-002.3). Flush any held pre-roll first.
+            self._flush_prime()
             log.debug("provider turn complete")
+            await self._end_turn()
+
+    async def _on_turn_audio(self, pcm: bytes) -> None:
+        """Handle one chunk of reply audio, applying pre-roll and the gap."""
+        if not self._turn_active:
+            await self._begin_turn()
+        await self._announce_speaking()
+        if self._primed:
+            self._emit(pcm)
+            return
+        # Still priming: accumulate until we have a cushion, then release.
+        self._prime_buf.extend(pcm)
+        if len(self._prime_buf) >= self._prime_bytes():
+            self._flush_prime()
+
+    async def _begin_turn(self) -> None:
+        """Start a new reply turn: gap of silence, then begin priming."""
+        self._turn_active = True
+        self._primed = False
+        self._prime_buf.clear()
+        gap = self._gap_bytes()
+        if gap:
+            self._emit(b"\x00" * gap)
+        if self._on_reply_start is not None:
+            try:
+                await self._on_reply_start()
+            except Exception:
+                log.exception("reply-start hook failed")
+
+    def _flush_prime(self) -> None:
+        """Release any held pre-roll audio and switch to pass-through."""
+        if self._prime_buf:
+            self._emit(bytes(self._prime_buf))
+            self._prime_buf.clear()
+        self._primed = True
+
+    async def _end_turn(self) -> None:
+        """Reset per-turn state and notify the app the AI stopped speaking."""
+        was_active = self._turn_active
+        self._reset_turn()
+        if was_active and self._on_reply_end is not None:
+            try:
+                await self._on_reply_end()
+            except Exception:
+                log.exception("reply-end hook failed")
+
+    def _reset_turn(self) -> None:
+        self._turn_active = False
+        self._primed = False
+        self._prime_buf.clear()
+        self._turn_announced = False
+
+    def _emit(self, pcm: bytes) -> None:
+        """Enqueue reply PCM at the provider output rate for playback.
+
+        The Playback Service resampler up-converts to the 48 kHz call boundary
+        (AC-AIVP-003.2 / AC-INJ-002.2).
+        """
+        self._sink.play_chunk(
+            AudioChunk(pcm=pcm, rate=self._provider.output_rate, channels=1)
+        )
+
+    def _prime_bytes(self) -> int:
+        return _ms_to_bytes(self._provider.output_rate, _PRIME_MS)
+
+    def _gap_bytes(self) -> int:
+        return _ms_to_bytes(self._provider.output_rate, _GAP_MS)
 
     async def _announce_speaking(self) -> None:
         """Post an in-call 'AI is speaking' note on the first audio of a turn.
@@ -220,3 +338,8 @@ class ProviderSessionManager:
             self._sink.interrupt()
         if self._on_loss is not None:
             await self._on_loss(reason)
+
+
+def _ms_to_bytes(rate: int, ms: int) -> int:
+    """Bytes of 16-bit mono PCM for `ms` milliseconds at `rate` Hz."""
+    return (rate * 2 * ms) // 1000
