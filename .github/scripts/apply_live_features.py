@@ -39,6 +39,7 @@ rt = patch(
     label="runtime: registry hook attributes",
 )
 
+
 rt = patch(
     rt,
     "        bridge = RawAudioBridge(self._client, on_disconnect=disconnected)\n",
@@ -86,6 +87,7 @@ ap = patch(
     label="app: register /tem",
 )
 
+
 ap = patch(
     ap,
     "        self._people_locks: dict[tuple[int, int], asyncio.Lock] = {}\n",
@@ -118,6 +120,7 @@ ap = patch(
     label="app: build config from template",
 )
 
+
 ap = patch(
     ap,
     '        async def speaking() -> None:\n'
@@ -138,6 +141,7 @@ ap = patch(
     "            await runtime.bridge.mute()\n",
     label="app: reply-boundary mute hooks",
 )
+
 
 ap = patch(
     ap,
@@ -235,4 +239,24 @@ ap = patch(
 )
 
 app_path.write_text(ap)
+
+
+# --- tests/test_runtime.py -------------------------------------------------
+test_path = Path("tests/test_runtime.py")
+tp = test_path.read_text()
+
+tp = patch(
+    tp,
+    "    def __init__(self, client: object, on_disconnect=None) -> None:\n",
+    "    def __init__(\n"
+    "        self,\n"
+    "        client: object,\n"
+    "        on_disconnect=None,\n"
+    "        on_participant=None,\n"
+    "        on_speaker=None,\n"
+    "    ) -> None:\n",
+    label="test: FakeBridge accepts participant/speaker hooks",
+)
+
+test_path.write_text(tp)
 print("done")
