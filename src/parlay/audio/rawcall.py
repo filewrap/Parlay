@@ -3,6 +3,11 @@
 This is the only module that imports pytgcalls. A single PyTgCalls engine is
 shared by all calls using the same MTProto client. Each adapter owns one chat,
 one update handler, and one paced raw-audio pump.
+
+Inbound diagnostics: to trace "call joined but no audio reaches the AI" cases,
+the update handler logs the first StreamFrames it sees, the first forwarded
+incoming-speaker frame, and any StreamFrames dropped by the direction/device
+filter. Set the `parlay.audio.rawcall` logger to DEBUG for per-frame detail.
 """
 
 from __future__ import annotations
@@ -24,6 +29,9 @@ FRAME_BYTES = SAMPLE_RATE * CHANNELS * BYTES_PER_SAMPLE * FRAME_MS // 1000
 RecordedHandler = Callable[[bytes, int], None]
 PlayedHandler = Callable[[int], bytes]
 DisconnectHandler = Callable[[], None]
+
+# Log an inbound-frame summary every this many forwarded frames.
+_RECV_LOG_EVERY = 500
 
 # PyTgCalls registers MTProto handlers on its client. Sharing one engine avoids
 # duplicate registration. Startup is protected per client, so unrelated clients
@@ -99,6 +107,8 @@ class RawCallAdapter:
         self._app: Any = None
         self._chat_id: int | None = None
         self._pump_task: asyncio.Task[None] | None = None
+        self._saw_stream_frames = False
+        self._recorded_frames = 0
 
     async def start(self, chat: Any) -> None:
         api = self._api = _load_api()
@@ -144,7 +154,9 @@ class RawCallAdapter:
                 await app.leave_call(chat_id)
         except Exception:
             log.warning("leave_call failed; probably already out of the call", exc_info=True)
-        log.info("left group call %s", chat_id)
+        log.info(
+            "left group call %s (forwarded %d inbound frames)", chat_id, self._recorded_frames
+        )
 
     async def _pump(self) -> None:
         api = self._api
@@ -170,9 +182,33 @@ class RawCallAdapter:
         if api is None or getattr(update, "chat_id", None) != self._chat_id:
             return
         if isinstance(update, api.StreamFrames):
-            if update.direction & api.Direction.INCOMING and update.device & api.Device.SPEAKER:
+            if not self._saw_stream_frames:
+                self._saw_stream_frames = True
+                log.info(
+                    "first StreamFrames update (direction=%s, device=%s, frames=%d)",
+                    getattr(update, "direction", "?"),
+                    getattr(update, "device", "?"),
+                    len(getattr(update, "frames", []) or []),
+                )
+            incoming = update.direction & api.Direction.INCOMING
+            speaker = update.device & api.Device.SPEAKER
+            if incoming and speaker:
                 for frame in update.frames:
                     self._on_recorded(frame.frame, len(frame.frame))
+                    self._recorded_frames += 1
+                    if self._recorded_frames == 1:
+                        log.info(
+                            "first inbound speaker frame forwarded (%d bytes)",
+                            len(frame.frame),
+                        )
+                    elif self._recorded_frames % _RECV_LOG_EVERY == 0:
+                        log.info("inbound speaker frames forwarded: %d", self._recorded_frames)
+            else:
+                log.debug(
+                    "dropped StreamFrames not matching incoming-speaker (dir=%s, dev=%s)",
+                    getattr(update, "direction", "?"),
+                    getattr(update, "device", "?"),
+                )
         elif isinstance(update, api.ChatUpdate):
             if update.status & api.ChatUpdate.Status.LEFT_CALL:
                 log.warning("group call ended or dropped (status=%s)", update.status)
