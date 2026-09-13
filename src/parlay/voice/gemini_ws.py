@@ -19,6 +19,10 @@ Wire contract (v1alpha, JSON frames):
     and replayed via setup.sessionResumption.handle on reconnect (REQ-AIVP-005).
 
 Same PCM contract as the SDK provider: 16 kHz mono in, 24 kHz mono out.
+
+Logging: to diagnose "socket open but silent" cases, this module logs the setup
+frame, periodic outbound audio totals, and a summary of every inbound frame. Set
+the `parlay.voice.gemini_ws` logger to DEBUG for per-frame detail.
 """
 
 from __future__ import annotations
@@ -46,6 +50,9 @@ _ENDPOINT = (
 )
 # How many consecutive reconnect attempts before giving up (REQ-AIVP-005.2).
 _MAX_RECONNECTS = 3
+# Log an outbound-audio summary every this many chunks, to confirm mic flow
+# without spamming a line per 20 ms frame.
+_SEND_LOG_EVERY = 100
 
 
 class GeminiLiveSocket:
@@ -57,6 +64,10 @@ class GeminiLiveSocket:
         self._ws: Any = None
         self._resume_handle: str | None = None
         self._closed = False
+        self._sent_chunks = 0
+        self._sent_bytes = 0
+        self._recv_audio_chunks = 0
+        self._recv_audio_bytes = 0
 
     @property
     def input_rate(self) -> int:
@@ -94,7 +105,16 @@ class GeminiLiveSocket:
             token = await self._tokens.token(force=self._resume_handle is None)
             url = f"{_ENDPOINT}?access_token={token}"
             self._ws = await connect(url, max_size=None)
-            await self._ws.send(json.dumps(self._setup_message()))
+            setup = self._setup_message()
+            log.info(
+                "Gemini Live sending setup (model=%s, modality=%s, voice=%s, resume=%s)",
+                setup["setup"].get("model"),
+                self._config.response_modality.name,
+                self._config.voice or "<default>",
+                bool(self._resume_handle),
+            )
+            log.debug("Gemini Live setup frame: %s", json.dumps(setup))
+            await self._ws.send(json.dumps(setup))
             await self._await_setup_complete()
         except ProviderError:
             raise
@@ -108,11 +128,25 @@ class GeminiLiveSocket:
         if ws is None:
             raise ProviderError("Gemini Live socket not connected")
         message = _decode(await ws.recv())
+        log.info("Gemini Live setup response frame keys: %s", sorted(message.keys()))
         if "error" in message:
             raise ProviderError(f"Gemini Live setup failed: {message['error']}")
+        if "setupComplete" not in message:
+            log.warning(
+                "Gemini Live first frame was not setupComplete: %s",
+                _summarize(message),
+            )
 
     async def close(self) -> None:
         self._closed = True
+        if self._ws is not None:
+            log.info(
+                "Gemini Live closing (sent %d chunks/%d bytes, recv %d audio chunks/%d bytes)",
+                self._sent_chunks,
+                self._sent_bytes,
+                self._recv_audio_chunks,
+                self._recv_audio_bytes,
+            )
         await self._teardown()
 
     async def _teardown(self) -> None:
@@ -139,6 +173,17 @@ class GeminiLiveSocket:
             await ws.send(json.dumps(frame))
         except Exception:
             log.debug("live socket send failed; receive loop will reconnect", exc_info=True)
+            return
+        self._sent_chunks += 1
+        self._sent_bytes += len(pcm)
+        if self._sent_chunks == 1:
+            log.info("Gemini Live first outbound audio chunk sent (%d bytes)", len(pcm))
+        elif self._sent_chunks % _SEND_LOG_EVERY == 0:
+            log.info(
+                "Gemini Live outbound audio: %d chunks, %d bytes total",
+                self._sent_chunks,
+                self._sent_bytes,
+            )
 
     # --- reply stream ---------------------------------------------------------
     async def events(self) -> AsyncIterator[ReplyEvent]:
@@ -168,23 +213,62 @@ class GeminiLiveSocket:
             return
         async for raw in ws:
             message = _decode(raw)
+            log.debug("Gemini Live inbound frame keys: %s", sorted(message.keys()))
             update = message.get("sessionResumptionUpdate")
             if isinstance(update, dict) and update.get("newHandle"):
                 self._resume_handle = update["newHandle"]
+                log.info("Gemini Live session resumption handle updated")
+            if message.get("goAway"):
+                log.warning("Gemini Live goAway received: %s", message["goAway"])
             content = message.get("serverContent")
             if not isinstance(content, dict):
+                # Surface anything that is neither serverContent nor a known
+                # control frame, so unexpected shapes are visible.
+                if not (update or "usageMetadata" in message or "goAway" in message):
+                    log.info("Gemini Live non-content frame: %s", _summarize(message))
                 continue
             if content.get("interrupted"):
+                log.info("Gemini Live turn interrupted")
                 yield ReplyEvent.interrupted()
             model_turn = content.get("modelTurn")
             if isinstance(model_turn, dict):
                 for part in model_turn.get("parts") or []:
-                    inline = part.get("inlineData") if isinstance(part, dict) else None
+                    if not isinstance(part, dict):
+                        continue
+                    text = part.get("text")
+                    if isinstance(text, str) and text:
+                        log.info("Gemini Live text part: %s", text[:200])
+                    inline = part.get("inlineData")
                     data = inline.get("data") if isinstance(inline, dict) else None
                     if data:
-                        yield ReplyEvent.audio(base64.b64decode(data))
+                        pcm = base64.b64decode(data)
+                        self._recv_audio_chunks += 1
+                        self._recv_audio_bytes += len(pcm)
+                        if self._recv_audio_chunks == 1:
+                            log.info(
+                                "Gemini Live first inbound audio part (%d bytes, mime=%s)",
+                                len(pcm),
+                                inline.get("mimeType") if isinstance(inline, dict) else "?",
+                            )
+                        yield ReplyEvent.audio(pcm)
             if content.get("turnComplete"):
+                log.info(
+                    "Gemini Live turnComplete (recv %d audio chunks/%d bytes this session)",
+                    self._recv_audio_chunks,
+                    self._recv_audio_bytes,
+                )
                 yield ReplyEvent.turn_complete()
+
+
+def _summarize(message: dict[str, Any]) -> str:
+    """Render a compact, log-safe view of a frame without dumping raw audio."""
+    try:
+        raw = json.dumps(message)
+    except (TypeError, ValueError):
+        return f"<unserializable frame keys={sorted(message.keys())}>"
+    if len(raw) > 500:
+        return raw[:500] + "...(truncated)"
+    return raw
 
 
 def _decode(raw: Any) -> dict[str, Any]:
