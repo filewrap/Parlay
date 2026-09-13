@@ -130,12 +130,16 @@ NEW_TEM = """    async def _cmd_tem(self, command: ParsedCommand) -> str:
         # AI is live: switch the voice instantly by reopening the session with the
         # new config. Gemini fixes the voice at setup, so a clean reopen is the
         # only way to change it; the session-engaged flag stays set throughout.
+        # mypy cannot carry the not-None narrowing across the awaits below, so
+        # pin both the runtime and the current producer with explicit asserts.
+        assert runtime is not None
+        old = runtime.ai
+        assert old is not None
         await self.vc.send_call_message(
             chat_id,
             fmt.status(f"Switching voice to {template.label} ({template.voice})...", "info"),
         )
         config = self._build_session_config(chat_id)
-        old = runtime.ai
         runtime.ai = None
         try:
             await old.disengage()
@@ -148,20 +152,6 @@ NEW_TEM = """    async def _cmd_tem(self, command: ParsedCommand) -> str:
             return fmt.error("Could not switch the voice; AI stopped. Start again with /live.")
         return fmt.success(f"Voice switched to {template.label} ({template.voice}).")
 """
-
-# mypy does not preserve the not-None narrowing of `runtime` (Runtime | None)
-# across the awaits and reassignment below, so pin it with an assert. `old`
-# (runtime.ai, typed Any | None) likewise needs an assert before .disengage().
-NEW_TEM = NEW_TEM.replace(
-    "        config = self._build_session_config(chat_id)\n"
-    "        old = runtime.ai\n"
-    "        runtime.ai = None\n",
-    "        assert runtime is not None\n"
-    "        config = self._build_session_config(chat_id)\n"
-    "        old = runtime.ai\n"
-    "        assert old is not None\n"
-    "        runtime.ai = None\n",
-)
 
 live_pat = re.compile(
     r"    async def _cmd_live\(self, command: ParsedCommand\) -> str:\n"
