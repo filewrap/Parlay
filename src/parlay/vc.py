@@ -11,6 +11,8 @@ Raw functions used (Telethon `telethon.tl.functions` / `telethon.tl.types`):
 - phone.GetGroupCallRequest(call, limit) -> participant count and title.
 - phone.CreateGroupCallRequest(peer, random_id) -> start a voice chat.
 - phone.DiscardGroupCallRequest(call) -> stop a voice chat.
+- phone.SendGroupCallMessageRequest(call, random_id, message) -> post a message
+    into the call's own in-call message pane (not the group history).
 - channels.GetParticipantRequest(channel, participant) -> own banned rights,
     used for the can-send check before posting into a call chat.
 
@@ -200,3 +202,40 @@ class VoiceChatController:
             raise VoiceChatError("Parlay is not allowed to send messages in this chat.")
         entity = await self.resolve(chat)
         return await self._client.send_message(entity, text)
+
+    async def send_call_message(self, chat: Any, text: str) -> bool:
+        """Post a message into the voice chat's own in-call message pane.
+
+        Uses phone.sendGroupCallMessage against the chat's active InputGroupCall.
+        These messages are delivered to call participants as an in-call overlay
+        and are not part of the group's regular message history.
+
+        Returns True when the message was sent, False when it could not be
+        (no active call, the installed Telethon layer lacks the request, the
+        call has messages disabled, or the server rejected it). Never raises,
+        so a failed in-call note cannot disrupt the call.
+        """
+        request_cls = getattr(functions.phone, "SendGroupCallMessageRequest", None)
+        text_cls = getattr(types, "TextWithEntities", None)
+        if request_cls is None or text_cls is None:
+            log.debug("in-call messages unavailable: Telethon layer lacks the request")
+            return False
+        try:
+            call = await self.get_active_call(chat)
+        except VoiceChatError:
+            return False
+        if call is None:
+            return False
+        message = text_cls(text=text, entities=[])
+        try:
+            await self._client(
+                request_cls(
+                    call=call,
+                    random_id=secrets.randbelow(2**63),
+                    message=message,
+                )
+            )
+        except Exception:
+            log.debug("in-call message send failed", exc_info=True)
+            return False
+        return True
