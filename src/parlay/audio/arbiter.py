@@ -44,6 +44,8 @@ class PlaybackTarget(Protocol):
 
     def play_frame(self, frame: Pcm48kFrame) -> None: ...
 
+    def mark_ready(self) -> None: ...
+
     def interrupt(self) -> None: ...
 
 
@@ -111,6 +113,11 @@ class AudioOutputArbiter:
         if self._holder is producer:
             self._target.play_frame(frame)
 
+    def mark_ready(self, producer: AudioProducer) -> None:
+        """Arm the playout buffer only if `producer` currently holds the output."""
+        if self._holder is producer:
+            self._target.mark_ready()
+
     def flush(self, producer: AudioProducer) -> None:
         """Flush pending playback only if `producer` currently holds the output."""
         if self._holder is producer:
@@ -138,6 +145,9 @@ class PlaybackHandle:
 
     def play_frame(self, frame: Pcm48kFrame) -> None:
         self._arbiter.play_frame(self._producer, frame)
+
+    def mark_ready(self) -> None:
+        self._arbiter.mark_ready(self._producer)
 
     def interrupt(self) -> None:
         self._arbiter.flush(self._producer)

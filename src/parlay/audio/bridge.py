@@ -78,6 +78,10 @@ class RawAudioBridge:
     def play_frame(self, frame: Pcm48kFrame) -> None:
         self._playback.enqueue_frame(frame)
 
+    def mark_ready(self) -> None:
+        """Arm the playout jitter buffer (release a run shorter than the cushion)."""
+        self._playback.mark_ready()
+
     def interrupt(self) -> None:
         """Clear pending playback at once (used on AI interruption)."""
         self._playback.flush()
