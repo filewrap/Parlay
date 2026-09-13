@@ -25,6 +25,9 @@ class FakeTarget:
     def play_frame(self, frame: object) -> None:
         self.events.append("frame")
 
+    def mark_ready(self) -> None:
+        self.events.append("ready")
+
     def interrupt(self) -> None:
         self.events.append("flush")
 
@@ -126,6 +129,20 @@ async def test_handle_gates_by_producer() -> None:
     handle.play_chunk(_chunk())
     handle.interrupt()
     assert target.events == ["chunk", "flush"]
+
+
+async def test_mark_ready_gated_by_producer() -> None:
+    # mark_ready arms the playout buffer only for the current holder.
+    target = FakeTarget()
+    arbiter = AudioOutputArbiter(target)
+    a = FakeProducer()
+    handle = arbiter.handle_for(a)
+    handle.mark_ready()  # a does not hold yet: dropped
+    assert target.events == []
+    await arbiter.acquire(a)
+    target.events.clear()
+    handle.mark_ready()
+    assert target.events == ["ready"]
 
 
 if __name__ == "__main__":

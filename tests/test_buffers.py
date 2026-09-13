@@ -67,3 +67,54 @@ def test_playback_flush_clears() -> None:
     assert len(pb) > 0
     pb.flush()
     assert len(pb) == 0
+
+
+# --- jitter-buffer mode (prebuffer_ms > 0) ---------------------------------
+
+
+def test_jitter_serves_silence_until_cushion_fills() -> None:
+    pb = PlaybackBuffer(prebuffer_ms=20)
+    frame_bytes = bytes_per_ms(CALL_RATE, CALL_CHANNELS) * 10
+    pb.enqueue(_frame(10))  # only 10 ms, cushion is 20 ms
+    # Not yet armed: a read returns silence and does not consume the buffer.
+    assert pb.take(frame_bytes) == b"\x00" * frame_bytes
+    assert len(pb) == frame_bytes
+    # Fill past the cushion; now reads serve real audio.
+    pb.enqueue(_frame(20))
+    out = pb.take(frame_bytes)
+    assert out != b"\x00" * frame_bytes
+
+
+def test_jitter_rearms_on_underrun_without_dropping_tail() -> None:
+    pb = PlaybackBuffer(prebuffer_ms=10)
+    frame_bytes = bytes_per_ms(CALL_RATE, CALL_CHANNELS) * 10
+    pb.enqueue(_frame(10))  # exactly the cushion -> arms
+    first = pb.take(frame_bytes)
+    assert first != b"\x00" * frame_bytes
+    # Buffer now empty: an underrun returns silence and re-arms (no partial word).
+    assert pb.take(frame_bytes) == b"\x00" * frame_bytes
+    # A short amount arrives but is below the cushion: still priming, kept intact.
+    pb.enqueue(_frame(5))
+    assert pb.take(frame_bytes) == b"\x00" * frame_bytes
+    assert len(pb) == bytes_per_ms(CALL_RATE, CALL_CHANNELS) * 5
+
+
+def test_jitter_mark_ready_releases_short_reply() -> None:
+    pb = PlaybackBuffer(prebuffer_ms=40)
+    frame_bytes = bytes_per_ms(CALL_RATE, CALL_CHANNELS) * 10
+    pb.enqueue(_frame(10))  # below the 40 ms cushion
+    assert pb.take(frame_bytes) == b"\x00" * frame_bytes  # still priming
+    pb.mark_ready()  # turn boundary: release what we have
+    out = pb.take(frame_bytes)
+    assert out != b"\x00" * frame_bytes
+
+
+def test_jitter_flush_reprimes() -> None:
+    pb = PlaybackBuffer(prebuffer_ms=10)
+    frame_bytes = bytes_per_ms(CALL_RATE, CALL_CHANNELS) * 10
+    pb.enqueue(_frame(10))
+    assert pb.take(frame_bytes) != b"\x00" * frame_bytes  # armed
+    pb.flush()
+    # After a flush the buffer re-primes: a fresh short enqueue is held again.
+    pb.enqueue(_frame(5))
+    assert pb.take(frame_bytes) == b"\x00" * frame_bytes
