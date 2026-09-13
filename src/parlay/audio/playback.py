@@ -5,7 +5,11 @@ exactly the requested byte count every cycle. It reads only from the
 PlaybackBuffer (no blocking work), substituting silence when empty.
 
 Producers (AI pipeline, file playback) enqueue provider audio, which is
-up-converted to 48 kHz stereo before entering the buffer.
+up-converted to 48 kHz stereo before entering the buffer. The buffer runs as a
+jitter buffer (see PlaybackBuffer): it holds a short cushion before draining a
+run of audio and re-fills the cushion on an underrun, so bursty provider audio
+plays smoothly instead of shattering. `mark_ready` releases a run shorter than
+the cushion at its turn boundary.
 """
 
 from __future__ import annotations
@@ -18,6 +22,13 @@ from .resampler import AudioResampler
 
 log = logging.getLogger(__name__)
 
+# Cushion held before a run of audio begins draining. Enough to absorb the
+# burstiness of native-audio replies without adding much latency.
+DEFAULT_PREBUFFER_MS = 200
+# High safety ceiling: audio is only discarded past this, so ordinary jitter
+# never drops. Far above the cushion so it does not interfere with pacing.
+DEFAULT_MAX_MS = 6000
+
 
 class PlaybackService:
     """Owns the outbound raw callback and the playback buffer."""
@@ -25,18 +36,20 @@ class PlaybackService:
     def __init__(
         self,
         resampler: AudioResampler | None = None,
-        max_ms: int = 2000,
+        max_ms: int = DEFAULT_MAX_MS,
         policy: str = OverflowPolicy.DROP_OLDEST,
+        prebuffer_ms: int = DEFAULT_PREBUFFER_MS,
     ) -> None:
         self._resampler = resampler or AudioResampler()
-        self._buffer = PlaybackBuffer(max_ms=max_ms, policy=policy)
+        self._buffer = PlaybackBuffer(max_ms=max_ms, policy=policy, prebuffer_ms=prebuffer_ms)
 
     # --- native-thread side ---------------------------------------------
     def on_played_data(self, length: int) -> bytes:
         """ntgcalls outbound callback. Runs on the native audio thread.
 
         Returns exactly `length` bytes, padding with silence when the buffer
-        is short (AC-INJ-001.1/.2). No blocking work (AC-INJ-001.3).
+        is short or still priming (AC-INJ-001.1/.2). No blocking work
+        (AC-INJ-001.3).
         """
         return self._buffer.take(length)
 
@@ -51,6 +64,10 @@ class PlaybackService:
         """Enqueue audio already at the 48 kHz call format."""
         if frame.pcm:
             self._buffer.enqueue(frame)
+
+    def mark_ready(self) -> None:
+        """Release buffered audio now even if the cushion is not yet full."""
+        self._buffer.mark_ready()
 
     def flush(self) -> None:
         """Clear pending audio at once (used on interruption)."""

@@ -1,15 +1,16 @@
-"""Selectable voice templates for the live AI (voice + persona presets).
+"""Selectable voice presets for the live AI (Gemini prebuilt voices + Hindi persona).
 
-Each template pairs one of the Gemini Live native-audio prebuilt HD voices with
-a persona (system instruction). Every persona instructs the model to reply only
-in Hindi, explicitly and with no fallback to another language, so a template
-switch changes both how the AI sounds and how it behaves while keeping the
-session Hindi-only.
+Each preset pairs one of the 30 Gemini Live native-audio prebuilt HD voices with
+a shared Hindi-only persona (system instruction). Selecting a preset changes how
+the AI sounds while keeping every session Hindi-only. Presets are addressed by a
+1-based number so an operator can switch on demand with a short command
+(e.g. `/tem 7`).
 
-Templates are addressed by a 1-based number so an operator can switch on demand
-with a short command (e.g. `/tem 3`). The voice names here are drawn from the
-30 prebuilt Gemini Live voices; changing a template's `voice` to any other
-prebuilt name is safe.
+The persona is deliberately generic (one warm, friendly assistant) so all 30
+voices are usable without inventing 30 distinct characters. The `label` per voice
+is Google's own descriptor for that voice; `gender` is display metadata only (the
+voice, not the persona, determines how it sounds). Changing a preset's `voice` to
+any other prebuilt name is safe.
 """
 
 from __future__ import annotations
@@ -25,14 +26,22 @@ _HINDI_RULE = (
     "kisi aur bhasha mein baat kare. Koi fallback nahi."
 )
 
+# One generic, friendly persona shared by every voice.
+_PERSONA = (
+    "Tum ek garmjoshi bhare, dostana aur madadgaar saathi ho. Natural, insaani "
+    "andaaz mein baat karo, chhote aur saaf jawab do, aur baat-cheet ko sehaj "
+    "aur apnepan bhara rakho."
+)
+
 
 @dataclass(frozen=True)
 class VoiceTemplate:
-    """One selectable preset: a label, a prebuilt voice, and a persona."""
+    """One selectable preset: a prebuilt voice plus the shared Hindi persona."""
 
     key: str
-    label: str
-    voice: str
+    label: str  # Google's character descriptor for the voice, e.g. "Warm".
+    voice: str  # Prebuilt Gemini Live voice name.
+    gender: str  # "Female" or "Male" (display metadata only).
     persona: str
 
     def system_instruction(self) -> str:
@@ -40,65 +49,55 @@ class VoiceTemplate:
         return f"{self.persona}{_HINDI_RULE}"
 
 
-# The ordered set of templates. The index (1-based) is the on-demand selector.
+def _voice(label: str, name: str, gender: str) -> VoiceTemplate:
+    return VoiceTemplate(key=name.lower(), label=label, voice=name, gender=gender, persona=_PERSONA)
+
+
+# All 30 Gemini Live prebuilt HD voices. Sulafat (Warm, female) is first so the
+# default preset is a warm female voice.
 TEMPLATES: tuple[VoiceTemplate, ...] = (
-    VoiceTemplate(
-        key="warm",
-        label="Warm",
-        voice="Sulafat",
-        persona=(
-            "Tum ek garmjoshi bhare, dostana saathi ho. Dheere, narmi se aur "
-            "apnepan ke saath baat karo, jaise kisi kareebi dost se baat kar rahe ho."
-        ),
-    ),
-    VoiceTemplate(
-        key="cool",
-        label="Cool",
-        voice="Charon",
-        persona=(
-            "Tum ek shaant, confident aur cool saathi ho. Aaram se, seedhi aur "
-            "bina jaldbaazi ke baat karo, aawaz mein thoda thehraav rakho."
-        ),
-    ),
-    VoiceTemplate(
-        key="energetic",
-        label="Energetic",
-        voice="Puck",
-        persona=(
-            "Tum ek josheela, upbeat saathi ho. Utsaah ke saath, thodi tez aur "
-            "lively andaaz mein baat karo, baat-cheet ko mazedaar banaye rakho."
-        ),
-    ),
-    VoiceTemplate(
-        key="calm",
-        label="Calm",
-        voice="Kore",
-        persona=(
-            "Tum ek sthir, sukoon dene wale saathi ho. Bahut shaant, sanyat aur "
-            "aashwasan bhare tareeke se baat karo, sunne wale ko rahat mehsoos ho."
-        ),
-    ),
-    VoiceTemplate(
-        key="playful",
-        label="Playful",
-        voice="Aoede",
-        persona=(
-            "Tum ek shararati, khilandad saathi ho. Halke-phulke andaaz mein, "
-            "thodi hansi-mazaak ke saath baat karo, par baat kaam ki rakho."
-        ),
-    ),
+    _voice("Warm", "Sulafat", "Female"),
+    _voice("Bright", "Zephyr", "Female"),
+    _voice("Upbeat", "Puck", "Male"),
+    _voice("Informative", "Charon", "Male"),
+    _voice("Firm", "Kore", "Female"),
+    _voice("Excitable", "Fenrir", "Male"),
+    _voice("Youthful", "Leda", "Female"),
+    _voice("Firm", "Orus", "Male"),
+    _voice("Breezy", "Aoede", "Female"),
+    _voice("Easy-going", "Callirrhoe", "Female"),
+    _voice("Bright", "Autonoe", "Female"),
+    _voice("Breathy", "Enceladus", "Male"),
+    _voice("Clear", "Iapetus", "Male"),
+    _voice("Easy-going", "Umbriel", "Male"),
+    _voice("Smooth", "Algieba", "Male"),
+    _voice("Smooth", "Despina", "Female"),
+    _voice("Clear", "Erinome", "Female"),
+    _voice("Gravelly", "Algenib", "Male"),
+    _voice("Informative", "Rasalgethi", "Male"),
+    _voice("Upbeat", "Laomedeia", "Female"),
+    _voice("Soft", "Achernar", "Female"),
+    _voice("Firm", "Alnilam", "Male"),
+    _voice("Even", "Schedar", "Male"),
+    _voice("Mature", "Gacrux", "Female"),
+    _voice("Forward", "Pulcherrima", "Female"),
+    _voice("Friendly", "Achird", "Male"),
+    _voice("Casual", "Zubenelgenubi", "Male"),
+    _voice("Gentle", "Vindemiatrix", "Female"),
+    _voice("Lively", "Sadachbia", "Male"),
+    _voice("Knowledgeable", "Sadaltager", "Male"),
 )
 
 DEFAULT_TEMPLATE_INDEX = 1
 
 
 def template_count() -> int:
-    """How many templates are available."""
+    """How many presets are available."""
     return len(TEMPLATES)
 
 
 def get_template(index: int) -> VoiceTemplate:
-    """Return the template for a 1-based index.
+    """Return the preset for a 1-based index.
 
     Raises ValueError when the index is outside 1..template_count().
     """
@@ -108,5 +107,7 @@ def get_template(index: int) -> VoiceTemplate:
 
 
 def describe_templates() -> str:
-    """A one-line-per-template summary for operator messages."""
-    return "\n".join(f"{i}. {t.label} ({t.voice})" for i, t in enumerate(TEMPLATES, start=1))
+    """A one-line-per-preset summary for operator messages."""
+    return "\n".join(
+        f"{i}. {t.label} ({t.voice}) \u2014 {t.gender}" for i, t in enumerate(TEMPLATES, start=1)
+    )
