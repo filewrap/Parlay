@@ -7,7 +7,10 @@ and producers enqueue into the Playback Sink.
 
 An unexpected call disconnect surfaces through `on_disconnect`: the native
 thread signals it and the bridge marshals it onto the asyncio loop so the
-session can be ended cleanly (REQ-BOT-006).
+session can be ended cleanly (REQ-BOT-006). Participant join/leave events
+surface through `on_participant` so the app can post an in-call join notice and
+track who is speaking. `mute()` / `unmute()` toggle the userbot's own outgoing
+stream.
 """
 
 from __future__ import annotations
@@ -26,12 +29,19 @@ from .resampler import AudioResampler
 log = logging.getLogger(__name__)
 
 DisconnectCallback = Callable[[], Awaitable[None]]
+# (action, user_id): action is "joined" or "left".
+ParticipantCallback = Callable[[str, int], None]
 
 
 class RawAudioBridge:
     """Owns one direction-pair of the raw path for a Call Session."""
 
-    def __init__(self, client: Any, on_disconnect: DisconnectCallback | None = None) -> None:
+    def __init__(
+        self,
+        client: Any,
+        on_disconnect: DisconnectCallback | None = None,
+        on_participant: ParticipantCallback | None = None,
+    ) -> None:
         resampler = AudioResampler()
         self._capture = AudioCaptureService(resampler=resampler)
         self._playback = PlaybackService(resampler=resampler)
@@ -42,6 +52,7 @@ class RawAudioBridge:
             on_recorded=self._capture.on_recorded_data,
             on_played=self._playback.on_played_data,
             on_disconnect=self._handle_disconnect,
+            on_participant=on_participant,
         )
         self._active = False
 
@@ -66,6 +77,15 @@ class RawAudioBridge:
     def interrupt(self) -> None:
         """Clear pending playback at once (used on AI interruption)."""
         self._playback.flush()
+
+    # --- self-mute ------------------------------------------------------
+    async def mute(self) -> None:
+        """Mute the userbot's own outgoing stream."""
+        await self._adapter.mute()
+
+    async def unmute(self) -> None:
+        """Unmute the userbot's own outgoing stream."""
+        await self._adapter.unmute()
 
     # --- disconnect handling --------------------------------------------
     def _handle_disconnect(self) -> None:
