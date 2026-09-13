@@ -346,6 +346,11 @@ class ParlayApp:
                     runtime.sessions.disengage_ai()
                 await self._notify_operator("AI voice stopped after a provider failure.")
 
+        async def speaking() -> None:
+            await self.vc.send_call_message(
+                runtime.chat_id, fmt.status("AI voice is speaking.", "speaking")
+            )
+
         ws_provider = (
             GeminiLiveSocket(
                 EphemeralTokenSource(
@@ -367,6 +372,7 @@ class ParlayApp:
             source=runtime.bridge,
             arbiter=runtime.arbiter,
             on_loss=lost,
+            on_speaking=speaking,
         )
         try:
             await ai.engage()
@@ -374,6 +380,7 @@ class ParlayApp:
             runtime.sessions.disengage_ai()
             raise
         runtime.ai = ai
+        self._spawn(self.vc.send_call_message(runtime.chat_id, fmt.success("AI voice started.")))
         return fmt.success("AI voice started in this chat.")
 
     async def _participant(self, user_id: int, chat_id: int) -> Any:
