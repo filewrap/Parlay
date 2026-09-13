@@ -22,6 +22,7 @@ from .session_manager import (
     CapturedSource,
     LossHandler,
     ProviderSessionManager,
+    ReplyBoundaryHandler,
     SpeakingHandler,
 )
 
@@ -38,6 +39,8 @@ class AiVoiceProducer:
         arbiter: AudioOutputArbiter,
         on_loss: LossHandler | None = None,
         on_speaking: SpeakingHandler | None = None,
+        on_reply_start: ReplyBoundaryHandler | None = None,
+        on_reply_end: ReplyBoundaryHandler | None = None,
     ) -> None:
         self._arbiter = arbiter
         self._sink: PlaybackHandle = arbiter.handle_for(self)
@@ -47,11 +50,17 @@ class AiVoiceProducer:
             sink=self._sink,
             on_loss=on_loss,
             on_speaking=on_speaking,
+            on_reply_start=on_reply_start,
+            on_reply_end=on_reply_end,
         )
 
     @property
     def engaged(self) -> bool:
         return self._pipeline.engaged
+
+    def note_speaker(self, name: str | None) -> None:
+        """Forward the current speaker's name to the provider as context."""
+        self._pipeline.note_speaker(name)
 
     async def engage(self) -> None:
         """Take the call output and open the provider session."""
