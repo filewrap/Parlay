@@ -6,8 +6,13 @@ one update handler, and one paced raw-audio pump.
 
 Inbound diagnostics: to trace "call joined but no audio reaches the AI" cases,
 the update handler logs the first StreamFrames it sees, the first forwarded
-incoming-speaker frame, and any StreamFrames dropped by the direction/device
-filter. Set the `parlay.audio.rawcall` logger to DEBUG for per-frame detail.
+incoming frame, and any StreamFrames dropped by the direction filter. Set the
+`parlay.audio.rawcall` logger to DEBUG for per-frame detail.
+
+NTgCalls reports incoming participant audio with the INCOMING direction and
+tags the device as MICROPHONE (the participant's mic), not SPEAKER. We forward
+every INCOMING frame regardless of device and drop OUTGOING frames (our own
+playout looped back).
 """
 
 from __future__ import annotations
@@ -154,7 +159,9 @@ class RawCallAdapter:
                 await app.leave_call(chat_id)
         except Exception:
             log.warning("leave_call failed; probably already out of the call", exc_info=True)
-        log.info("left group call %s (forwarded %d inbound frames)", chat_id, self._recorded_frames)
+        log.info(
+            "left group call %s (forwarded %d inbound frames)", chat_id, self._recorded_frames
+        )
 
     async def _pump(self) -> None:
         api = self._api
@@ -188,22 +195,24 @@ class RawCallAdapter:
                     getattr(update, "device", "?"),
                     len(getattr(update, "frames", []) or []),
                 )
-            incoming = update.direction & api.Direction.INCOMING
-            speaker = update.device & api.Device.SPEAKER
-            if incoming and speaker:
+            # NTgCalls tags incoming participant audio as MICROPHONE, not
+            # SPEAKER, so filter on direction only and forward every incoming
+            # frame. OUTGOING frames are our own playout looped back; drop them.
+            if update.direction & api.Direction.INCOMING:
                 for frame in update.frames:
                     self._on_recorded(frame.frame, len(frame.frame))
                     self._recorded_frames += 1
                     if self._recorded_frames == 1:
                         log.info(
-                            "first inbound speaker frame forwarded (%d bytes)",
+                            "first inbound frame forwarded (%d bytes, device=%s)",
                             len(frame.frame),
+                            getattr(update, "device", "?"),
                         )
                     elif self._recorded_frames % _RECV_LOG_EVERY == 0:
-                        log.info("inbound speaker frames forwarded: %d", self._recorded_frames)
+                        log.info("inbound frames forwarded: %d", self._recorded_frames)
             else:
                 log.debug(
-                    "dropped StreamFrames not matching incoming-speaker (dir=%s, dev=%s)",
+                    "dropped outgoing StreamFrames (dir=%s, dev=%s)",
                     getattr(update, "direction", "?"),
                     getattr(update, "device", "?"),
                 )
