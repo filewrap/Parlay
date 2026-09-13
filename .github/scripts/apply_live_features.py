@@ -150,8 +150,8 @@ NEW_TEM = """    async def _cmd_tem(self, command: ParsedCommand) -> str:
 """
 
 live_pat = re.compile(
-    r"    async def _cmd_live\\(self, command: ParsedCommand\\) -> str:\\n"
-    r".*?(?=\\n    async def _cmd_tem\\(self, command: ParsedCommand\\) -> str:)",
+    r"    async def _cmd_live\(self, command: ParsedCommand\) -> str:\n"
+    r".*?(?=\n    async def _cmd_tem\(self, command: ParsedCommand\) -> str:)",
     re.DOTALL,
 )
 if not live_pat.search(text):
@@ -160,8 +160,8 @@ if not live_pat.search(text):
 text = live_pat.sub(lambda m: NEW_LIVE, text, count=1)
 
 tem_pat = re.compile(
-    r"    async def _cmd_tem\\(self, command: ParsedCommand\\) -> str:\\n"
-    r".*?(?=\\n    def _on_call_participant\\(self, chat_id: int, action: str, user_id: int\\) -> None:)",
+    r"    async def _cmd_tem\(self, command: ParsedCommand\) -> str:\n"
+    r".*?(?=\n    def _on_call_participant\(self, chat_id: int, action: str, user_id: int\) -> None:)",
     re.DOTALL,
 )
 if not tem_pat.search(text):
