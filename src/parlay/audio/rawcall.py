@@ -13,6 +13,11 @@ NTgCalls reports incoming participant audio with the INCOMING direction and
 tags the device as MICROPHONE (the participant's mic), not SPEAKER. We forward
 every INCOMING frame regardless of device and drop OUTGOING frames (our own
 playout looped back).
+
+Participant updates (join/leave) arrive as UpdatedGroupCallParticipant and are
+forwarded through an optional on_participant callback so the app can post an
+in-call join notice and track who is speaking. Self-mute is exposed through
+mute()/unmute(), which drive our own outgoing stream via the engine.
 """
 
 from __future__ import annotations
@@ -34,6 +39,8 @@ FRAME_BYTES = SAMPLE_RATE * CHANNELS * BYTES_PER_SAMPLE * FRAME_MS // 1000
 RecordedHandler = Callable[[bytes, int], None]
 PlayedHandler = Callable[[int], bytes]
 DisconnectHandler = Callable[[], None]
+# (action, user_id): action is "joined" or "left".
+ParticipantHandler = Callable[[str, int], None]
 
 # Log an inbound-frame summary every this many forwarded frames.
 _RECV_LOG_EVERY = 500
@@ -103,17 +110,20 @@ class RawCallAdapter:
         on_recorded: RecordedHandler,
         on_played: PlayedHandler,
         on_disconnect: DisconnectHandler | None = None,
+        on_participant: ParticipantHandler | None = None,
     ) -> None:
         self._client = client
         self._on_recorded = on_recorded
         self._on_played = on_played
         self._on_disconnect = on_disconnect
+        self._on_participant = on_participant
         self._api: SimpleNamespace | None = None
         self._app: Any = None
         self._chat_id: int | None = None
         self._pump_task: asyncio.Task[None] | None = None
         self._saw_stream_frames = False
         self._recorded_frames = 0
+        self._muted = False
 
     async def start(self, chat: Any) -> None:
         api = self._api = _load_api()
@@ -163,6 +173,27 @@ class RawCallAdapter:
             "left group call %s (forwarded %d inbound frames)", chat_id, self._recorded_frames
         )
 
+    # --- self-mute ------------------------------------------------------------
+    async def mute(self) -> None:
+        """Mute our own outgoing stream. Degrades to a no-op on API mismatch."""
+        await self._set_muted(True)
+
+    async def unmute(self) -> None:
+        """Unmute our own outgoing stream. Degrades to a no-op on API mismatch."""
+        await self._set_muted(False)
+
+    async def _set_muted(self, muted: bool) -> None:
+        if self._app is None or self._chat_id is None or muted == self._muted:
+            return
+        method = getattr(self._app, "mute" if muted else "unmute", None)
+        if method is None:
+            return
+        try:
+            await method(self._chat_id)
+            self._muted = muted
+        except Exception:
+            log.debug("self-%s failed", "mute" if muted else "unmute", exc_info=True)
+
     async def _pump(self) -> None:
         api = self._api
         assert api is not None
@@ -187,37 +218,65 @@ class RawCallAdapter:
         if api is None or getattr(update, "chat_id", None) != self._chat_id:
             return
         if isinstance(update, api.StreamFrames):
-            if not self._saw_stream_frames:
-                self._saw_stream_frames = True
-                log.info(
-                    "first StreamFrames update (direction=%s, device=%s, frames=%d)",
-                    getattr(update, "direction", "?"),
-                    getattr(update, "device", "?"),
-                    len(getattr(update, "frames", []) or []),
-                )
-            # NTgCalls tags incoming participant audio as MICROPHONE, not
-            # SPEAKER, so filter on direction only and forward every incoming
-            # frame. OUTGOING frames are our own playout looped back; drop them.
-            if update.direction & api.Direction.INCOMING:
-                for frame in update.frames:
-                    self._on_recorded(frame.frame, len(frame.frame))
-                    self._recorded_frames += 1
-                    if self._recorded_frames == 1:
-                        log.info(
-                            "first inbound frame forwarded (%d bytes, device=%s)",
-                            len(frame.frame),
-                            getattr(update, "device", "?"),
-                        )
-                    elif self._recorded_frames % _RECV_LOG_EVERY == 0:
-                        log.info("inbound frames forwarded: %d", self._recorded_frames)
-            else:
-                log.debug(
-                    "dropped outgoing StreamFrames (dir=%s, dev=%s)",
-                    getattr(update, "direction", "?"),
-                    getattr(update, "device", "?"),
-                )
+            self._handle_frames(update)
         elif isinstance(update, api.ChatUpdate):
             if update.status & api.ChatUpdate.Status.LEFT_CALL:
                 log.warning("group call ended or dropped (status=%s)", update.status)
                 if self._on_disconnect is not None:
                     self._on_disconnect()
+        else:
+            self._handle_participant(update)
+
+    def _handle_frames(self, update: Any) -> None:
+        api = self._api
+        assert api is not None
+        if not self._saw_stream_frames:
+            self._saw_stream_frames = True
+            log.info(
+                "first StreamFrames update (direction=%s, device=%s, frames=%d)",
+                getattr(update, "direction", "?"),
+                getattr(update, "device", "?"),
+                len(getattr(update, "frames", []) or []),
+            )
+        # NTgCalls tags incoming participant audio as MICROPHONE, not SPEAKER,
+        # so filter on direction only and forward every incoming frame. OUTGOING
+        # frames are our own playout looped back; drop them.
+        if update.direction & api.Direction.INCOMING:
+            for frame in update.frames:
+                self._on_recorded(frame.frame, len(frame.frame))
+                self._recorded_frames += 1
+                if self._recorded_frames == 1:
+                    log.info(
+                        "first inbound frame forwarded (%d bytes, device=%s)",
+                        len(frame.frame),
+                        getattr(update, "device", "?"),
+                    )
+                elif self._recorded_frames % _RECV_LOG_EVERY == 0:
+                    log.info("inbound frames forwarded: %d", self._recorded_frames)
+        else:
+            log.debug(
+                "dropped outgoing StreamFrames (dir=%s, dev=%s)",
+                getattr(update, "direction", "?"),
+                getattr(update, "device", "?"),
+            )
+
+    def _handle_participant(self, update: Any) -> None:
+        """Forward join/leave for an UpdatedGroupCallParticipant-shaped update.
+
+        The concrete type name varies across pytgcalls builds, so this matches
+        structurally: an object carrying a `participant` with a `user_id` and an
+        `action`. Anything else is ignored.
+        """
+        if self._on_participant is None:
+            return
+        participant = getattr(update, "participant", None)
+        user_id = getattr(participant, "user_id", None)
+        if not isinstance(user_id, int):
+            return
+        action = getattr(update, "action", None)
+        name = getattr(action, "name", str(action)) if action is not None else ""
+        text = name.upper()
+        if "LEFT" in text:
+            self._on_participant("left", user_id)
+        elif "JOIN" in text:
+            self._on_participant("joined", user_id)
