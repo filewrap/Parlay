@@ -39,7 +39,7 @@ class FakeWS:
     async def close(self) -> None:
         self.closed = True
 
-    def __aiter__(self) -> "FakeWS":
+    def __aiter__(self) -> FakeWS:
         return self
 
     async def __anext__(self) -> str:
@@ -53,9 +53,7 @@ async def test_setup_send_and_reply_roundtrip(monkeypatch):
     audio = base64.b64encode(b"pcmpcm").decode()
     frames = [
         json.dumps({"setupComplete": {}}),
-        json.dumps(
-            {"serverContent": {"modelTurn": {"parts": [{"inlineData": {"data": audio}}]}}}
-        ),
+        json.dumps({"serverContent": {"modelTurn": {"parts": [{"inlineData": {"data": audio}}]}}}),
         json.dumps({"serverContent": {"turnComplete": True}}),
     ]
     fake = FakeWS(frames)

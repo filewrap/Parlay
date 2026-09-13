@@ -16,62 +16,60 @@ APP_IMPORT_NEW = (
     "from .voice.provider import SessionConfiguration\n"
 )
 
-APP_STATE_OLD = (
-    '        ai_state = "ready" if self.config.gemini_api_key else "not configured"\n'
-)
+APP_STATE_OLD = '        ai_state = "ready" if self.config.gemini_api_key else "not configured"\n'
 APP_STATE_NEW = (
-    '        ai_state = (\n'
+    "        ai_state = (\n"
     '            "ready"\n'
-    '            if self.config.gemini_api_key or self.config.gemini_live_token_url\n'
+    "            if self.config.gemini_api_key or self.config.gemini_live_token_url\n"
     '            else "not configured"\n'
-    '        )\n'
+    "        )\n"
 )
 
 APP_GUARD_OLD = (
-    '    async def _cmd_live(self, command: ParsedCommand) -> str:\n'
-    '        if not self.config.gemini_api_key:\n'
+    "    async def _cmd_live(self, command: ParsedCommand) -> str:\n"
+    "        if not self.config.gemini_api_key:\n"
     '            return fmt.error("AI voice is disabled. Configure GEMINI_API_KEY to enable it.")\n'
 )
 APP_GUARD_NEW = (
-    '    async def _cmd_live(self, command: ParsedCommand) -> str:\n'
-    '        if not self.config.gemini_api_key and not self.config.gemini_live_token_url:\n'
-    '            return fmt.error(\n'
+    "    async def _cmd_live(self, command: ParsedCommand) -> str:\n"
+    "        if not self.config.gemini_api_key and not self.config.gemini_live_token_url:\n"
+    "            return fmt.error(\n"
     '                "AI voice is disabled. Configure GEMINI_API_KEY or "\n'
     '                "GEMINI_LIVE_TOKEN_URL to enable it."\n'
-    '            )\n'
+    "            )\n"
 )
 
 APP_PROVIDER_OLD = (
-    '        ai = AiVoiceProducer(\n'
-    '            GeminiVoiceProvider(self.config.gemini_api_key, config),\n'
-    '            source=runtime.bridge,\n'
-    '            arbiter=runtime.arbiter,\n'
-    '            on_loss=lost,\n'
-    '        )\n'
+    "        ai = AiVoiceProducer(\n"
+    "            GeminiVoiceProvider(self.config.gemini_api_key, config),\n"
+    "            source=runtime.bridge,\n"
+    "            arbiter=runtime.arbiter,\n"
+    "            on_loss=lost,\n"
+    "        )\n"
 )
 APP_PROVIDER_NEW = (
-    '        ws_provider = (\n'
-    '            GeminiLiveSocket(\n'
-    '                EphemeralTokenSource(\n'
-    '                    self.config.gemini_live_token_url,\n'
-    '                    ttl_s=self.config.gemini_live_token_ttl,\n'
-    '                ),\n'
-    '                config,\n'
-    '            )\n'
-    '            if self.config.gemini_live_token_url\n'
-    '            else None\n'
-    '        )\n'
-    '        sdk_provider = (\n'
-    '            GeminiVoiceProvider(self.config.gemini_api_key, config)\n'
-    '            if self.config.gemini_api_key\n'
-    '            else None\n'
-    '        )\n'
-    '        ai = AiVoiceProducer(\n'
-    '            FallbackVoiceProvider(ws_provider, sdk_provider),\n'
-    '            source=runtime.bridge,\n'
-    '            arbiter=runtime.arbiter,\n'
-    '            on_loss=lost,\n'
-    '        )\n'
+    "        ws_provider = (\n"
+    "            GeminiLiveSocket(\n"
+    "                EphemeralTokenSource(\n"
+    "                    self.config.gemini_live_token_url,\n"
+    "                    ttl_s=self.config.gemini_live_token_ttl,\n"
+    "                ),\n"
+    "                config,\n"
+    "            )\n"
+    "            if self.config.gemini_live_token_url\n"
+    "            else None\n"
+    "        )\n"
+    "        sdk_provider = (\n"
+    "            GeminiVoiceProvider(self.config.gemini_api_key, config)\n"
+    "            if self.config.gemini_api_key\n"
+    "            else None\n"
+    "        )\n"
+    "        ai = AiVoiceProducer(\n"
+    "            FallbackVoiceProvider(ws_provider, sdk_provider),\n"
+    "            source=runtime.bridge,\n"
+    "            arbiter=runtime.arbiter,\n"
+    "            on_loss=lost,\n"
+    "        )\n"
 )
 
 CFG_FIELD_OLD = "    youtube_api_key: str | None = None\n"

@@ -43,6 +43,8 @@ class Config:
     ml_db_path: str = "data/parlay-ml.sqlite3"
     ml_model_dir: str = "data/models"
     youtube_api_key: str | None = None
+    gemini_live_token_url: str | None = None
+    gemini_live_token_ttl: float = 1500.0
 
 
 def _require(name: str) -> str:
@@ -122,4 +124,6 @@ def load_config() -> Config:
         ml_db_path=_optional("ML_DB_PATH") or "data/parlay-ml.sqlite3",
         ml_model_dir=_optional("ML_MODEL_DIR") or "data/models",
         youtube_api_key=_optional("YOUTUBE_API_KEY"),
+        gemini_live_token_url=_optional("GEMINI_LIVE_TOKEN_URL"),
+        gemini_live_token_ttl=float(_optional("GEMINI_LIVE_TOKEN_TTL") or 1500.0),
     )

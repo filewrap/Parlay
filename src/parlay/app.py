@@ -31,7 +31,10 @@ from .runtime import Runtime, RuntimeRegistry
 from .search import MediaSearch
 from .vc import VoiceChatController, VoiceChatError
 from .voice.ai_producer import AiVoiceProducer
+from .voice.fallback import FallbackVoiceProvider
 from .voice.gemini import GeminiVoiceProvider, default_configuration
+from .voice.gemini_ws import GeminiLiveSocket
+from .voice.live_token import EphemeralTokenSource
 from .voice.provider import SessionConfiguration
 
 log = logging.getLogger(__name__)
@@ -303,7 +306,11 @@ class ParlayApp:
         return fmt.status("Nothing is playing here.", "idle")
 
     async def _cmd_start(self, command: ParsedCommand) -> str:
-        ai_state = "ready" if self.config.gemini_api_key else "not configured"
+        ai_state = (
+            "ready"
+            if self.config.gemini_api_key or self.config.gemini_live_token_url
+            else "not configured"
+        )
         return fmt.status(
             "Parlay is configured and running. "
             "Commands: /join to connect to the voice chat, /play to play music, "
@@ -313,8 +320,11 @@ class ParlayApp:
         )
 
     async def _cmd_live(self, command: ParsedCommand) -> str:
-        if not self.config.gemini_api_key:
-            return fmt.error("AI voice is disabled. Configure GEMINI_API_KEY to enable it.")
+        if not self.config.gemini_api_key and not self.config.gemini_live_token_url:
+            return fmt.error(
+                "AI voice is disabled. Configure GEMINI_API_KEY or "
+                "GEMINI_LIVE_TOKEN_URL to enable it."
+            )
         runtime = self.registry.get(command.chat_id or 0)
         if runtime is None:
             return fmt.error("Connect Parlay here with /join before starting AI voice.")
@@ -336,8 +346,24 @@ class ParlayApp:
                     runtime.sessions.disengage_ai()
                 await self._notify_operator("AI voice stopped after a provider failure.")
 
+        ws_provider = (
+            GeminiLiveSocket(
+                EphemeralTokenSource(
+                    self.config.gemini_live_token_url,
+                    ttl_s=self.config.gemini_live_token_ttl,
+                ),
+                config,
+            )
+            if self.config.gemini_live_token_url
+            else None
+        )
+        sdk_provider = (
+            GeminiVoiceProvider(self.config.gemini_api_key, config)
+            if self.config.gemini_api_key
+            else None
+        )
         ai = AiVoiceProducer(
-            GeminiVoiceProvider(self.config.gemini_api_key, config),
+            FallbackVoiceProvider(ws_provider, sdk_provider),
             source=runtime.bridge,
             arbiter=runtime.arbiter,
             on_loss=lost,

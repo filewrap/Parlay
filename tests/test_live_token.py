@@ -17,7 +17,7 @@ class _Resp:
     def read(self) -> bytes:
         return self._b
 
-    def __enter__(self) -> "_Resp":
+    def __enter__(self) -> _Resp:
         return self
 
     def __exit__(self, *a: object) -> bool:
@@ -64,9 +64,7 @@ def test_fetch_reads_configured_field(monkeypatch):
 
 
 def test_fetch_missing_field_raises(monkeypatch):
-    monkeypatch.setattr(
-        urllib.request, "urlopen", lambda *a, **k: _Resp(json.dumps({"nope": 1}))
-    )
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Resp(json.dumps({"nope": 1})))
     src = EphemeralTokenSource("https://x")
     with pytest.raises(TokenError):
         src._fetch()
