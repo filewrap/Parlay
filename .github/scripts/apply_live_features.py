@@ -149,6 +149,27 @@ NEW_TEM = """    async def _cmd_tem(self, command: ParsedCommand) -> str:
         return fmt.success(f"Voice switched to {template.label} ({template.voice}).")
 """
 
+# _cmd_tem holds a reference to `runtime` across an await inside a try/except.
+# mypy cannot preserve the not-None narrowing from the early-return guard across
+# that boundary, so bind a locally-typed alias it can follow.
+NEW_TEM = NEW_TEM.replace(
+    "        config = self._build_session_config(chat_id)\n        old = runtime.ai\n",
+    "        session_runtime = runtime\n"
+    "        config = self._build_session_config(chat_id)\n"
+    "        old = session_runtime.ai\n",
+).replace(
+    "        runtime.ai = None\n        try:\n            await old.disengage()\n"
+    "            await self._engage_ai(runtime, config)\n",
+    "        session_runtime.ai = None\n        try:\n            await old.disengage()\n"
+    "            await self._engage_ai(session_runtime, config)\n",
+).replace(
+    "        except BaseException:\n            runtime.ai = None\n"
+    "            if runtime.sessions.active:\n                runtime.sessions.disengage_ai()\n",
+    "        except BaseException:\n            session_runtime.ai = None\n"
+    "            if session_runtime.sessions.active:\n"
+    "                session_runtime.sessions.disengage_ai()\n",
+)
+
 live_pat = re.compile(
     r"    async def _cmd_live\(self, command: ParsedCommand\) -> str:\n"
     r".*?(?=\n    async def _cmd_tem\(self, command: ParsedCommand\) -> str:)",
