@@ -6,6 +6,9 @@ on:
       - ".github/workflows/apply-live-features.yml"
       - ".github/scripts/apply_live_features.py"
 
+permissions:
+  contents: write
+
 jobs:
   apply:
     runs-on: ubuntu-latest
