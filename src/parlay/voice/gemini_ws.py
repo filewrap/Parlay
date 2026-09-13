@@ -8,6 +8,13 @@ make the live engine more robust: a second, dependency-light path that does not
 rely on the SDK and can be used as the primary transport with the SDK as a
 fallback.
 
+Resilience: the socket keeps itself alive with periodic WebSocket pings and
+recovers from drops. On a receive error it reconnects with exponential backoff,
+replaying the session resumption handle when the server gave one and otherwise
+opening a fresh session, so a transient network blip does not tear the live AI
+down. Only after `_MAX_RECONNECTS` consecutive failed attempts does it surface
+an unrecoverable loss.
+
 Wire contract (v1alpha, JSON frames):
   * First client frame: {"setup": {...}} then the server replies
     {"setupComplete": {}}.
@@ -30,6 +37,7 @@ the `parlay.voice.gemini_ws` logger to DEBUG for per-frame detail.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -52,7 +60,14 @@ _ENDPOINT = (
     "google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained"
 )
 # How many consecutive reconnect attempts before giving up (REQ-AIVP-005.2).
-_MAX_RECONNECTS = 3
+_MAX_RECONNECTS = 5
+# Exponential backoff bounds between reconnect attempts (seconds).
+_BACKOFF_BASE_S = 0.5
+_BACKOFF_MAX_S = 8.0
+# WebSocket keepalive: ping this often and wait this long for the pong. Keeps
+# idle sockets (and their auth/session) alive and detects a dead peer quickly.
+_PING_INTERVAL_S = 20.0
+_PING_TIMEOUT_S = 20.0
 # Log an outbound-audio summary every this many chunks, to confirm mic flow
 # without spamming a line per 20 ms frame.
 _SEND_LOG_EVERY = 100
@@ -107,7 +122,12 @@ class GeminiLiveSocket:
         try:
             token = await self._tokens.token(force=self._resume_handle is None)
             url = f"{_ENDPOINT}?access_token={token}"
-            self._ws = await connect(url, max_size=None)
+            self._ws = await connect(
+                url,
+                max_size=None,
+                ping_interval=_PING_INTERVAL_S,
+                ping_timeout=_PING_TIMEOUT_S,
+            )
             setup = self._setup_message()
             log.info(
                 "Gemini Live sending setup (model=%s, modality=%s, voice=%s, resume=%s)",
@@ -211,7 +231,7 @@ class GeminiLiveSocket:
 
     # --- reply stream ---------------------------------------------------------
     async def events(self) -> AsyncIterator[ReplyEvent]:
-        """Yield reply events, reconnecting across session time-limits."""
+        """Yield reply events, reconnecting across drops and session time-limits."""
         reconnects = 0
         while not self._closed:
             try:
@@ -225,10 +245,17 @@ class GeminiLiveSocket:
             if self._closed:
                 break
             reconnects += 1
-            if reconnects > _MAX_RECONNECTS or self._resume_handle is None:
+            if reconnects > _MAX_RECONNECTS:
                 raise ProviderError("Gemini Live socket lost and could not be resumed")
             await self._teardown()
-            await self._connect()
+            await asyncio.sleep(_backoff_delay(reconnects))
+            try:
+                await self._connect()
+            except ProviderError as exc:
+                # Keep trying until the attempt budget is spent; a fresh session
+                # (no resume handle) is fine if resumption is unavailable.
+                log.warning("Gemini Live reconnect attempt %d failed: %s", reconnects, exc)
+                continue
             log.info("Gemini Live socket resumed (attempt %d)", reconnects)
 
     async def _read_once(self) -> AsyncIterator[ReplyEvent]:
@@ -282,6 +309,11 @@ class GeminiLiveSocket:
                     self._recv_audio_bytes,
                 )
                 yield ReplyEvent.turn_complete()
+
+
+def _backoff_delay(attempt: int) -> float:
+    """Exponential backoff (capped) for the given 1-based reconnect attempt."""
+    return min(_BACKOFF_MAX_S, _BACKOFF_BASE_S * (2 ** (attempt - 1)))
 
 
 def _summarize(message: dict[str, Any]) -> str:
