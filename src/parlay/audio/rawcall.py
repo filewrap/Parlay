@@ -16,7 +16,9 @@ playout looped back).
 
 Participant updates (join/leave) arrive as UpdatedGroupCallParticipant and are
 forwarded through an optional on_participant callback so the app can post an
-in-call join notice and track who is speaking. Self-mute is exposed through
+in-call join notice. Each participant carries a `source` (its audio SSRC); each
+StreamFrame carries a matching `ssrc`, so mapping the two identifies the active
+speaker, reported through on_speaker. Self-mute is exposed through
 mute()/unmute(), which drive our own outgoing stream via the engine.
 """
 
@@ -41,6 +43,8 @@ PlayedHandler = Callable[[int], bytes]
 DisconnectHandler = Callable[[], None]
 # (action, user_id): action is "joined" or "left".
 ParticipantHandler = Callable[[str, int], None]
+# (user_id,): the participant whose audio is currently arriving.
+SpeakerHandler = Callable[[int], None]
 
 # Log an inbound-frame summary every this many forwarded frames.
 _RECV_LOG_EVERY = 500
@@ -111,12 +115,14 @@ class RawCallAdapter:
         on_played: PlayedHandler,
         on_disconnect: DisconnectHandler | None = None,
         on_participant: ParticipantHandler | None = None,
+        on_speaker: SpeakerHandler | None = None,
     ) -> None:
         self._client = client
         self._on_recorded = on_recorded
         self._on_played = on_played
         self._on_disconnect = on_disconnect
         self._on_participant = on_participant
+        self._on_speaker = on_speaker
         self._api: SimpleNamespace | None = None
         self._app: Any = None
         self._chat_id: int | None = None
@@ -124,6 +130,9 @@ class RawCallAdapter:
         self._saw_stream_frames = False
         self._recorded_frames = 0
         self._muted = False
+        # SSRC (audio source id) -> user id, learned from participant updates.
+        self._ssrc_user: dict[int, int] = {}
+        self._active_speaker: int | None = None
 
     async def start(self, chat: Any) -> None:
         api = self._api = _load_api()
@@ -241,42 +250,62 @@ class RawCallAdapter:
         # NTgCalls tags incoming participant audio as MICROPHONE, not SPEAKER,
         # so filter on direction only and forward every incoming frame. OUTGOING
         # frames are our own playout looped back; drop them.
-        if update.direction & api.Direction.INCOMING:
-            for frame in update.frames:
-                self._on_recorded(frame.frame, len(frame.frame))
-                self._recorded_frames += 1
-                if self._recorded_frames == 1:
-                    log.info(
-                        "first inbound frame forwarded (%d bytes, device=%s)",
-                        len(frame.frame),
-                        getattr(update, "device", "?"),
-                    )
-                elif self._recorded_frames % _RECV_LOG_EVERY == 0:
-                    log.info("inbound frames forwarded: %d", self._recorded_frames)
-        else:
+        if not (update.direction & api.Direction.INCOMING):
             log.debug(
                 "dropped outgoing StreamFrames (dir=%s, dev=%s)",
                 getattr(update, "direction", "?"),
                 getattr(update, "device", "?"),
             )
+            return
+        frames = update.frames or []
+        self._detect_speaker(frames)
+        for frame in frames:
+            self._on_recorded(frame.frame, len(frame.frame))
+            self._recorded_frames += 1
+            if self._recorded_frames == 1:
+                log.info(
+                    "first inbound frame forwarded (%d bytes, device=%s)",
+                    len(frame.frame),
+                    getattr(update, "device", "?"),
+                )
+            elif self._recorded_frames % _RECV_LOG_EVERY == 0:
+                log.info("inbound frames forwarded: %d", self._recorded_frames)
+
+    def _detect_speaker(self, frames: list) -> None:
+        """Report the active speaker when the incoming SSRC maps to a known user."""
+        if self._on_speaker is None or not frames or not self._ssrc_user:
+            return
+        ssrc = getattr(frames[0], "ssrc", None)
+        if not isinstance(ssrc, int):
+            return
+        user_id = self._ssrc_user.get(ssrc)
+        if user_id is None or user_id == self._active_speaker:
+            return
+        self._active_speaker = user_id
+        self._on_speaker(user_id)
 
     def _handle_participant(self, update: Any) -> None:
-        """Forward join/leave for an UpdatedGroupCallParticipant-shaped update.
+        """Handle an UpdatedGroupCallParticipant-shaped update.
 
-        The concrete type name varies across pytgcalls builds, so this matches
-        structurally: an object carrying a `participant` with a `user_id` and an
-        `action`. Anything else is ignored.
+        Records the participant's SSRC (`source`) for speaker detection and
+        forwards join/leave through on_participant. Matches structurally so it
+        works across pytgcalls builds; anything else is ignored.
         """
-        if self._on_participant is None:
-            return
         participant = getattr(update, "participant", None)
         user_id = getattr(participant, "user_id", None)
         if not isinstance(user_id, int):
             return
+        source = getattr(participant, "source", None)
+        if isinstance(source, int):
+            self._ssrc_user[source] = user_id
         action = getattr(update, "action", None)
         name = getattr(action, "name", str(action)) if action is not None else ""
         text = name.upper()
         if "LEFT" in text:
-            self._on_participant("left", user_id)
+            if isinstance(source, int):
+                self._ssrc_user.pop(source, None)
+            if self._on_participant is not None:
+                self._on_participant("left", user_id)
         elif "JOIN" in text:
-            self._on_participant("joined", user_id)
+            if self._on_participant is not None:
+                self._on_participant("joined", user_id)
