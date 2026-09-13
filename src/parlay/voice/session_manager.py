@@ -7,13 +7,16 @@ closes the session. Interruptions flush pending playback immediately; an
 unrecoverable session loss reports to the Operator and disengages.
 
 Turn shaping (natural feel):
-  * Pre-roll priming. Native-audio replies arrive in bursts that can outrun the
-    fixed 10 ms playout callback, so the first words underrun the buffer and
-    sound shattered. The manager holds the first `_PRIME_MS` of a turn's audio
-    and releases it in one enqueue, giving the playout a cushion so the opening
-    words are smooth.
+  * Smoothing lives in the playout jitter buffer, not here. The manager streams
+    each reply chunk straight to the sink; the jitter buffer holds a short
+    cushion before draining and re-fills it on an underrun, so bursty
+    native-audio replies play smoothly instead of shattering, without this
+    module having to guess a pre-roll size.
   * Inter-turn gap. A short `_GAP_MS` of silence is prepended to each turn so the
     AI does not start speaking on top of the user and the exchange feels paced.
+    That silence also seeds the jitter cushion.
+  * Turn boundary arming. At turn end the manager arms the buffer (`mark_ready`)
+    so a reply shorter than the cushion still plays out promptly.
 
 This module is provider-agnostic (talks to `VoiceProvider`) and bridge-agnostic
 (talks to the `CapturedSource` / `PlaybackSink` protocols), so it is fully unit
@@ -51,12 +54,8 @@ ReplyBoundaryHandler = Callable[[], Awaitable[None]]
 # so repeated turns do not flood the chat (REQ-AIVP-008.3).
 _SPEAKING_THROTTLE_S = 30.0
 
-# Milliseconds of reply audio to buffer before the first chunk of a turn is
-# allowed to play, so bursty early frames do not underrun the playout.
-_PRIME_MS = 320
-
 # Milliseconds of silence prepended to each turn so replies feel paced and do
-# not begin on top of the user.
+# not begin on top of the user. This also seeds the playout jitter cushion.
 _GAP_MS = 200
 
 
@@ -109,8 +108,6 @@ class ProviderSessionManager:
         self._last_announce: float | None = None
         # Per-turn playout shaping state.
         self._turn_active = False
-        self._primed = False
-        self._prime_buf = bytearray()
         # Current speaker context already sent to the provider.
         self._speaker: str | None = None
 
@@ -237,30 +234,23 @@ class ProviderSessionManager:
             self._sink.interrupt()
             await self._end_turn()
         elif event.kind is ReplyEventKind.TURN_COMPLETE:
-            # Segment boundary; buffer drains to silence on its own
-            # (AC-AIVP-003.3 / AC-INJ-002.3). Flush any held pre-roll first.
-            self._flush_prime()
+            # Segment boundary; arm the jitter buffer so a short reply still
+            # drains, then let it play out to silence on its own
+            # (AC-AIVP-003.3 / AC-INJ-002.3).
+            self._mark_ready()
             log.debug("provider turn complete")
             await self._end_turn()
 
     async def _on_turn_audio(self, pcm: bytes) -> None:
-        """Handle one chunk of reply audio, applying pre-roll and the gap."""
+        """Stream one chunk of reply audio to the sink (jitter buffer smooths it)."""
         if not self._turn_active:
             await self._begin_turn()
         await self._announce_speaking()
-        if self._primed:
-            self._emit(pcm)
-            return
-        # Still priming: accumulate until we have a cushion, then release.
-        self._prime_buf.extend(pcm)
-        if len(self._prime_buf) >= self._prime_bytes():
-            self._flush_prime()
+        self._emit(pcm)
 
     async def _begin_turn(self) -> None:
-        """Start a new reply turn: unmute, gap of silence, then begin priming."""
+        """Start a new reply turn: unmute, then a leading gap of silence."""
         self._turn_active = True
-        self._primed = False
-        self._prime_buf.clear()
         # Signal reply start first so the app can unmute the outgoing stream
         # before any audio is queued, avoiding a clipped opening.
         if self._on_reply_start is not None:
@@ -271,13 +261,6 @@ class ProviderSessionManager:
         gap = self._gap_bytes()
         if gap:
             self._emit(b"\x00" * gap)
-
-    def _flush_prime(self) -> None:
-        """Release any held pre-roll audio and switch to pass-through."""
-        if self._prime_buf:
-            self._emit(bytes(self._prime_buf))
-            self._prime_buf.clear()
-        self._primed = True
 
     async def _end_turn(self) -> None:
         """Reset per-turn state and notify the app the AI stopped speaking."""
@@ -291,8 +274,6 @@ class ProviderSessionManager:
 
     def _reset_turn(self) -> None:
         self._turn_active = False
-        self._primed = False
-        self._prime_buf.clear()
         self._turn_announced = False
 
     def _emit(self, pcm: bytes) -> None:
@@ -303,8 +284,11 @@ class ProviderSessionManager:
         """
         self._sink.play_chunk(AudioChunk(pcm=pcm, rate=self._provider.output_rate, channels=1))
 
-    def _prime_bytes(self) -> int:
-        return _ms_to_bytes(self._provider.output_rate, _PRIME_MS)
+    def _mark_ready(self) -> None:
+        """Arm the playout buffer at a turn boundary, if the sink supports it."""
+        mark = getattr(self._sink, "mark_ready", None)
+        if mark is not None:
+            mark()
 
     def _gap_bytes(self) -> int:
         return _ms_to_bytes(self._provider.output_rate, _GAP_MS)
