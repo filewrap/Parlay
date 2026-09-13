@@ -23,7 +23,8 @@ _DURATION = re.compile(r"^(\d+)(s|m|h)$", re.IGNORECASE)
 _HELP = (
     "Parlay companion commands:\n"
     "/room [duration] - create a personal room (default 2h; 5m to 24h)\n"
-    "/play <query> - play in this Telegram group\n"
+    "/play <query> - play a track in your Telegram group\n"
+    "/live - chat live with the AI in the group voice chat\n"
     "/compass on|off|reset|delete|count [1-10]|suggestions\n"
     "/start - allow private bot delivery\n"
     "/help - show this help"
@@ -214,10 +215,21 @@ class CompanionBot:
         if sender is None or not bool(getattr(event, "is_private", False)):
             return
         await asyncio.to_thread(self._state.set_eligible, sender.id, True)
-        await event.reply("Private delivery is available. Compass stays off until /compass on.")
+        await event.reply(
+            "Private delivery is available. Compass stays off until /compass on.",
+            buttons=self._menu_buttons(),
+        )
 
     async def _command_help(self, event: Any, args: str) -> None:
-        await event.reply(_HELP)
+        await event.reply(_HELP, buttons=self._menu_buttons())
+
+    def _menu_buttons(self) -> list[list[Any]]:
+        """Inline menu for /start and /help (bot-only; user accounts cannot send buttons)."""
+        rows: list[list[Any]] = [[Button.switch_inline("Play music", "play ", same_peer=True)]]
+        url = str(getattr(self.config, "mini_app_url", "") or "")
+        if url.startswith("https://"):
+            rows.append([Button.url("Open Parlay", url)])
+        return rows
 
     async def _command_room(self, event: Any, args: str) -> None:
         sender = await self._verified_sender(event)

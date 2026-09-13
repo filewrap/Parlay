@@ -75,6 +75,7 @@ class ParlayApp:
             "join",
             "leave",
             "start",
+            "live",
             "stop",
             "status",
             "vc",
@@ -302,6 +303,16 @@ class ParlayApp:
         return fmt.status("Nothing is playing here.", "idle")
 
     async def _cmd_start(self, command: ParsedCommand) -> str:
+        ai_state = "ready" if self.config.gemini_api_key else "not configured"
+        return fmt.status(
+            "Parlay is configured and running. "
+            "Commands: /join to connect to the voice chat, /play to play music, "
+            "/live to chat with the AI, /stop to stop. "
+            f"AI voice is {ai_state}.",
+            "connected",
+        )
+
+    async def _cmd_live(self, command: ParsedCommand) -> str:
         if not self.config.gemini_api_key:
             return fmt.error("AI voice is disabled. Configure GEMINI_API_KEY to enable it.")
         runtime = self.registry.get(command.chat_id or 0)

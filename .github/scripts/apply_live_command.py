@@ -24,39 +24,39 @@ APP_REG_NEW = '            "start",\n            "live",\n            "stop",\n'
 
 # --- app.py: /start becomes status, AI logic moves to /live ---
 APP_START_OLD = (
-    '    async def _cmd_start(self, command: ParsedCommand) -> str:\n'
-    '        if not self.config.gemini_api_key:\n'
+    "    async def _cmd_start(self, command: ParsedCommand) -> str:\n"
+    "        if not self.config.gemini_api_key:\n"
     '            return fmt.error("AI voice is disabled. Configure GEMINI_API_KEY to enable it.")\n'
 )
 APP_START_NEW = (
-    '    async def _cmd_start(self, command: ParsedCommand) -> str:\n'
+    "    async def _cmd_start(self, command: ParsedCommand) -> str:\n"
     '        ai_state = "ready" if self.config.gemini_api_key else "not configured"\n'
-    '        return fmt.status(\n'
+    "        return fmt.status(\n"
     '            "Parlay is configured and running. "\n'
     '            "Commands: /join to connect to the voice chat, /play to play music, "\n'
     '            "/live to chat with the AI, /stop to stop. "\n'
     '            f"AI voice is {ai_state}.",\n'
     '            "connected",\n'
-    '        )\n'
-    '\n'
-    '    async def _cmd_live(self, command: ParsedCommand) -> str:\n'
-    '        if not self.config.gemini_api_key:\n'
+    "        )\n"
+    "\n"
+    "    async def _cmd_live(self, command: ParsedCommand) -> str:\n"
+    "        if not self.config.gemini_api_key:\n"
     '            return fmt.error("AI voice is disabled. Configure GEMINI_API_KEY to enable it.")\n'
 )
 
 # --- bot.py: refreshed help text ---
 BOT_HELP_OLD = (
-    '_HELP = (\n'
+    "_HELP = (\n"
     '    "Parlay companion commands:\\n"\n'
     '    "/room [duration] - create a personal room (default 2h; 5m to 24h)\\n"\n'
     '    "/play <query> - play in this Telegram group\\n"\n'
     '    "/compass on|off|reset|delete|count [1-10]|suggestions\\n"\n'
     '    "/start - allow private bot delivery\\n"\n'
     '    "/help - show this help"\n'
-    ')'
+    ")"
 )
 BOT_HELP_NEW = (
-    '_HELP = (\n'
+    "_HELP = (\n"
     '    "Parlay companion commands:\\n"\n'
     '    "/room [duration] - create a personal room (default 2h; 5m to 24h)\\n"\n'
     '    "/play <query> - play a track in your Telegram group\\n"\n'
@@ -64,38 +64,38 @@ BOT_HELP_NEW = (
     '    "/compass on|off|reset|delete|count [1-10]|suggestions\\n"\n'
     '    "/start - allow private bot delivery\\n"\n'
     '    "/help - show this help"\n'
-    ')'
+    ")"
 )
 
 # --- bot.py: attach a button menu to /start ---
 BOT_START_OLD = (
-    '        await asyncio.to_thread(self._state.set_eligible, sender.id, True)\n'
+    "        await asyncio.to_thread(self._state.set_eligible, sender.id, True)\n"
     '        await event.reply("Private delivery is available. Compass stays off until /compass on.")\n'
 )
 BOT_START_NEW = (
-    '        await asyncio.to_thread(self._state.set_eligible, sender.id, True)\n'
-    '        await event.reply(\n'
+    "        await asyncio.to_thread(self._state.set_eligible, sender.id, True)\n"
+    "        await event.reply(\n"
     '            "Private delivery is available. Compass stays off until /compass on.",\n'
-    '            buttons=self._menu_buttons(),\n'
-    '        )\n'
+    "            buttons=self._menu_buttons(),\n"
+    "        )\n"
 )
 
 # --- bot.py: buttons on /help + the _menu_buttons helper ---
 BOT_HELP_FN_OLD = (
-    '    async def _command_help(self, event: Any, args: str) -> None:\n'
-    '        await event.reply(_HELP)\n'
+    "    async def _command_help(self, event: Any, args: str) -> None:\n"
+    "        await event.reply(_HELP)\n"
 )
 BOT_HELP_FN_NEW = (
-    '    async def _command_help(self, event: Any, args: str) -> None:\n'
-    '        await event.reply(_HELP, buttons=self._menu_buttons())\n'
-    '\n'
-    '    def _menu_buttons(self) -> list[list[Any]]:\n'
+    "    async def _command_help(self, event: Any, args: str) -> None:\n"
+    "        await event.reply(_HELP, buttons=self._menu_buttons())\n"
+    "\n"
+    "    def _menu_buttons(self) -> list[list[Any]]:\n"
     '        """Inline menu for /start and /help (bot-only; user accounts cannot send buttons)."""\n'
     '        rows: list[list[Any]] = [[Button.switch_inline("Play music", "play ", same_peer=True)]]\n'
     '        url = str(getattr(self.config, "mini_app_url", "") or "")\n'
     '        if url.startswith("https://"):\n'
     '            rows.append([Button.url("Open Parlay", url)])\n'
-    '        return rows\n'
+    "        return rows\n"
 )
 
 
